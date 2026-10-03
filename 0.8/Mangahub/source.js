@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.1","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":21};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.2","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":21};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2439,15 +2439,15 @@ class ChapterCrypto {
     }
     return {
       keyId: data.keyId,
-      keyBits,
+      cipher: new sjcl.cipher.aes(keyBits),
       expiresAt: typeof data.expiresAt === "number" && Number.isFinite(data.expiresAt)
         ? data.expiresAt
         : Date.now() + DEFAULT_KEY_TTL_MS
     };
   }
 
-  async getKey(keyId, forceRefresh = false) {
-    if (!forceRefresh && this.key?.keyId === keyId && this.key.expiresAt > Date.now() + KEY_EXPIRY_SAFETY_MARGIN_MS) {
+  async getKey(keyId) {
+    if (this.key?.keyId === keyId && this.key.expiresAt > Date.now() + KEY_EXPIRY_SAFETY_MARGIN_MS) {
       return this.key;
     }
     if (!this.pendingKey) {
@@ -2467,15 +2467,12 @@ class ChapterCrypto {
     }
     if (!pagesField.startsWith("enc:")) return parsePageUrls(pagesField);
     const envelope = parseEncryptedPagesEnvelope(pagesField);
-    const initialKey = await this.getKey(envelope.keyId);
-    const key = initialKey.keyId === envelope.keyId
-      ? initialKey
-      : await this.getKey(envelope.keyId, true);
+    const key = await this.getKey(envelope.keyId);
     if (key.keyId !== envelope.keyId) throw new ChapterKeyMismatchError();
     const combined = sjcl.bitArray.concat(envelope.ciphertext, envelope.authTag);
     const plaintext = (() => {
       try {
-        return sjcl.mode.gcm.decrypt(new sjcl.cipher.aes(key.keyBits), combined, envelope.iv, [], GCM_TAG_BITS);
+        return sjcl.mode.gcm.decrypt(key.cipher, combined, envelope.iv, [], GCM_TAG_BITS);
       } catch {
         this.key = null;
         throw new Error("Chapter page authentication failed. Please reload this chapter.");
@@ -2486,18 +2483,64 @@ class ChapterCrypto {
 }
 
 const UPSTREAM = ROOT.Sources;
+const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
+const CHAPTER_PAGES_CACHE_LIMIT = 16;
+const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 
 class Mangahub extends UPSTREAM.Mangahub {
   constructor() {
     super();
     this.chapterCrypto = new ChapterCrypto(this.requestManager);
     this.pendingAccessKey = null;
-    this.getMhubAccess = async () => {
+    this.pendingRequests = new Map();
+    this.chapterPagesCache = new Map();
+    this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
       const cookie = /(?:^|;\s*)mhub_access=([^;]*)/.exec(stored);
       return cookie ? cookie[1] : stored;
-    };
+    });
+  }
+
+  shareRequest(key, load) {
+    if (!this.pendingRequests.has(key)) {
+      const pending = Promise.resolve().then(load).finally(() => {
+        if (this.pendingRequests.get(key) === pending) this.pendingRequests.delete(key);
+      });
+      this.pendingRequests.set(key, pending);
+    }
+    return this.pendingRequests.get(key);
+  }
+
+  getMangaDetails(mangaId) {
+    return this.shareRequest(JSON.stringify(["manga", mangaId]), () => super.getMangaDetails(mangaId));
+  }
+
+  getChapters(mangaId) {
+    return this.shareRequest(JSON.stringify(["chapters", mangaId]), async () => {
+      const request = App.createRequest({
+        url: MH_API_DOMAIN,
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        data: {
+          query: `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { chapters { number title date } } }`
+        }
+      });
+      const response = await this.requestManager.schedule(request, 1);
+      const result = parseResponse(response, "Chapters unavailable");
+      if (result.errors?.length) {
+        throw new Error(`MangaHub: ${result.errors.map((error) => error.message || "Unknown API error").join(" ")}`);
+      }
+      const chapters = result.data?.manga?.chapters;
+      if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
+      return chapters.map((chapter) => App.createChapter({
+        id: String(chapter.number),
+        name: chapter.title || `Chapter ${chapter.number}`,
+        langCode: CHAPTER_LANGUAGE,
+        chapNum: chapter.number,
+        time: new Date(chapter.date)
+      }));
+    });
   }
 
   async refreshAPIKey() {
@@ -2511,6 +2554,7 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async fetchAccessKey() {
     await this.stateManager.store(ACCESS_KEY_STATE, "");
+    this.pendingRequests.delete(ACCESS_KEY_STATE);
     const cookieStore = this.requestManager.cookieStore;
     for (const cookie of cookieStore?.getAllCookies() ?? []) {
       if (cookie.name === ACCESS_COOKIE_NAME) cookieStore.removeCookie(cookie);
@@ -2533,11 +2577,33 @@ class Mangahub extends UPSTREAM.Mangahub {
       throw new Error("MangaHub did not provide an access key. Open the source's Cloudflare bypass and try again.");
     }
     await this.stateManager.store(ACCESS_KEY_STATE, key);
+    this.pendingRequests.delete(ACCESS_KEY_STATE);
   }
 
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
+    const cacheKey = JSON.stringify(["pages", mangaId, number]);
+    const cached = this.chapterPagesCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.chapterPagesCache.delete(cacheKey);
+      this.chapterPagesCache.set(cacheKey, cached);
+      return App.createChapterDetails({ id: chapterId, mangaId, pages: cached.pages.slice() });
+    }
+    this.chapterPagesCache.delete(cacheKey);
+    const pages = await this.shareRequest(cacheKey, async () => {
+      const pages = await this.loadChapterPages(mangaId, number);
+      this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
+      while (this.chapterPagesCache.size > CHAPTER_PAGES_CACHE_LIMIT) {
+        this.chapterPagesCache.delete(this.chapterPagesCache.keys().next().value);
+      }
+      return pages;
+    });
+    return App.createChapterDetails({ id: chapterId, mangaId, pages: pages.slice() });
+  }
+
+  async loadChapterPages(mangaId, number) {
+    if (this.pendingAccessKey) await this.pendingAccessKey;
     if (!await this.getMhubAccess()) await this.refreshAPIKey();
     for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
       const request = App.createRequest({
@@ -2559,8 +2625,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         throw new Error(`MangaHub: ${errors}`);
       }
       try {
-        const pages = await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);
-        return App.createChapterDetails({ id: chapterId, mangaId, pages });
+        return await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);
       } catch (error) {
         if (error instanceof ChapterKeyMismatchError && attempt + 1 < MAX_CHAPTER_ATTEMPTS) continue;
         throw error;

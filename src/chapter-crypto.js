@@ -88,15 +88,15 @@ class ChapterCrypto {
     }
     return {
       keyId: data.keyId,
-      keyBits,
+      cipher: new sjcl.cipher.aes(keyBits),
       expiresAt: typeof data.expiresAt === "number" && Number.isFinite(data.expiresAt)
         ? data.expiresAt
         : Date.now() + DEFAULT_KEY_TTL_MS
     };
   }
 
-  async getKey(keyId, forceRefresh = false) {
-    if (!forceRefresh && this.key?.keyId === keyId && this.key.expiresAt > Date.now() + KEY_EXPIRY_SAFETY_MARGIN_MS) {
+  async getKey(keyId) {
+    if (this.key?.keyId === keyId && this.key.expiresAt > Date.now() + KEY_EXPIRY_SAFETY_MARGIN_MS) {
       return this.key;
     }
     if (!this.pendingKey) {
@@ -116,15 +116,12 @@ class ChapterCrypto {
     }
     if (!pagesField.startsWith("enc:")) return parsePageUrls(pagesField);
     const envelope = parseEncryptedPagesEnvelope(pagesField);
-    const initialKey = await this.getKey(envelope.keyId);
-    const key = initialKey.keyId === envelope.keyId
-      ? initialKey
-      : await this.getKey(envelope.keyId, true);
+    const key = await this.getKey(envelope.keyId);
     if (key.keyId !== envelope.keyId) throw new ChapterKeyMismatchError();
     const combined = sjcl.bitArray.concat(envelope.ciphertext, envelope.authTag);
     const plaintext = (() => {
       try {
-        return sjcl.mode.gcm.decrypt(new sjcl.cipher.aes(key.keyBits), combined, envelope.iv, [], GCM_TAG_BITS);
+        return sjcl.mode.gcm.decrypt(key.cipher, combined, envelope.iv, [], GCM_TAG_BITS);
       } catch {
         this.key = null;
         throw new Error("Chapter page authentication failed. Please reload this chapter.");
