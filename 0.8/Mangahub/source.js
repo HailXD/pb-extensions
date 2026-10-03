@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.2","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":21};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.3","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":21};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2363,7 +2363,7 @@ const ACCESS_KEY_STATE = "mhub_key";
 const ACCESS_COOKIE_NAME = "mhub_access";
 const ACCESS_KEY_REFRESH_PATH = "/chapter/the-last-human/chapter-1?reloadKey=1";
 const MAX_CHAPTER_ATTEMPTS = 2;
-const RETRYABLE_API_ERROR = /rate\s*limit|api\s*key|encryption unavailable|unauth|access.*(?:invalid|expired)/i;
+const RETRYABLE_API_ERROR = /api\s*key|encryption unavailable|unauth|access.*(?:invalid|expired)/i;
 
 function parseResponse(response, label) {
   if (response.status === 403 || response.status === 503) {
@@ -2486,20 +2486,118 @@ const UPSTREAM = ROOT.Sources;
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
+const REQUESTS_PER_SECOND = 1;
+const REQUEST_TIMEOUT_MS = 15_000;
+const RATE_LIMIT_STATE = "mhub_rate_limit";
+const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
+const MILLISECONDS_PER_SECOND = 1_000;
+const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
+
+class MangaHubRateLimitError extends Error {
+  constructor(retryAt) {
+    const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / MILLISECONDS_PER_SECOND));
+    super(`MangaHub rate limit reached. Wait ${seconds} seconds before retrying. Pause bulk downloads. If it persists, open MangaHub through the source's Cloudflare bypass and complete any verification.`);
+  }
+}
+
+function rateLimitCooldown(response) {
+  const header = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === "retry-after")?.[1];
+  const value = String(Array.isArray(header) ? header[0] ?? "" : header ?? "").trim();
+  const delay = /^\d+(?:\.\d+)?$/.test(value)
+    ? Number(value) * MILLISECONDS_PER_SECOND
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay)
+    ? Math.max(MILLISECONDS_PER_SECOND, delay)
+    : DEFAULT_RATE_LIMIT_COOLDOWN_MS;
+}
 
 class Mangahub extends UPSTREAM.Mangahub {
   constructor() {
     super();
-    this.chapterCrypto = new ChapterCrypto(this.requestManager);
     this.pendingAccessKey = null;
     this.pendingRequests = new Map();
     this.chapterPagesCache = new Map();
+    this.rateLimitUntil = 0;
+    this.refreshAccessAfterCooldown = false;
+    this.pendingRateLimitState = null;
+    this.pendingRateLimitStore = Promise.resolve();
+    this.requestManager = App.createRequestManager({
+      requestsPerSecond: REQUESTS_PER_SECOND,
+      requestTimeout: REQUEST_TIMEOUT_MS,
+      interceptor: {
+        interceptRequest: async (request) => {
+          await this.assertRequestAllowed();
+          const [userAgent, access] = await Promise.all([
+            this.requestManager.getDefaultUserAgent(),
+            this.getMhubAccess()
+          ]);
+          await this.assertRequestAllowed();
+          request.headers = {
+            ...request.headers ?? {},
+            Referer: `${MH_DOMAIN}/`,
+            Origin: MH_DOMAIN,
+            "User-Agent": userAgent,
+            "x-mhub-access": access
+          };
+          return request;
+        },
+        interceptResponse: async (response) => {
+          await this.handleRateLimit(response);
+          return response;
+        }
+      }
+    });
+    this.chapterCrypto = new ChapterCrypto(this.requestManager);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
       const cookie = /(?:^|;\s*)mhub_access=([^;]*)/.exec(stored);
       return cookie ? cookie[1] : stored;
     });
+  }
+
+  async assertRequestAllowed() {
+    if (!this.pendingRateLimitState) {
+      this.pendingRateLimitState = this.stateManager.retrieve(RATE_LIMIT_STATE).then((state) => {
+        if (typeof state?.until === "number" && Number.isFinite(state.until)) {
+          this.rateLimitUntil = Math.max(this.rateLimitUntil, state.until);
+          this.refreshAccessAfterCooldown = state.refreshAccessKey === true;
+        }
+      }).catch((error) => {
+        this.pendingRateLimitState = null;
+        throw error;
+      });
+    }
+    await this.pendingRateLimitState;
+    if (this.rateLimitUntil > Date.now()) throw new MangaHubRateLimitError(this.rateLimitUntil);
+  }
+
+  async handleRateLimit(response) {
+    const result = (() => {
+      try {
+        return JSON.parse(response.data);
+      } catch {
+        return null;
+      }
+    })();
+    const limited = Array.isArray(result?.errors) && result.errors.some((error) =>
+      RATE_LIMIT_ERROR.test(error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
+    );
+    if (response.status !== 429 && !limited) return;
+    this.rateLimitUntil = Math.max(this.rateLimitUntil, Date.now() + rateLimitCooldown(response));
+    if (limited && response.status !== 429) this.refreshAccessAfterCooldown = true;
+    await this.storeRateLimitState().catch(() => {});
+    throw new MangaHubRateLimitError(this.rateLimitUntil);
+  }
+
+  storeRateLimitState() {
+    this.pendingRateLimitStore = this.pendingRateLimitStore.catch(() => {}).then(() =>
+      this.stateManager.store(RATE_LIMIT_STATE, {
+        until: this.rateLimitUntil,
+        refreshAccessKey: this.refreshAccessAfterCooldown
+      })
+    );
+    return this.pendingRateLimitStore;
   }
 
   shareRequest(key, load) {
@@ -2553,6 +2651,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async fetchAccessKey() {
+    await this.assertRequestAllowed();
     await this.stateManager.store(ACCESS_KEY_STATE, "");
     this.pendingRequests.delete(ACCESS_KEY_STATE);
     const cookieStore = this.requestManager.cookieStore;
@@ -2578,6 +2677,10 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     await this.stateManager.store(ACCESS_KEY_STATE, key);
     this.pendingRequests.delete(ACCESS_KEY_STATE);
+    if (this.refreshAccessAfterCooldown && this.rateLimitUntil <= Date.now()) {
+      this.refreshAccessAfterCooldown = false;
+      await this.storeRateLimitState().catch(() => {});
+    }
   }
 
   async getChapterDetails(mangaId, chapterId) {
@@ -2603,8 +2706,9 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async loadChapterPages(mangaId, number) {
+    await this.assertRequestAllowed();
     if (this.pendingAccessKey) await this.pendingAccessKey;
-    if (!await this.getMhubAccess()) await this.refreshAPIKey();
+    if (this.refreshAccessAfterCooldown || !await this.getMhubAccess()) await this.refreshAPIKey();
     for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
       const request = App.createRequest({
         url: MH_API_DOMAIN,

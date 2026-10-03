@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.2, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.3, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.2 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.2 from this repository.
+Install MangaHub 3.1.3 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.3 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -41,7 +41,8 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Caches keys and initialized AES ciphers in memory, refreshes before expiry, and shares concurrent key requests
 - Fetches a key on key-ID mismatch and retries the chapter request once if rotation leaves it out of sync, without fetching the same mismatched key twice
 - Rejects malformed page data and authentication failures rather than returning an empty chapter
-- Normalizes old stored access cookies into API tokens and retries recognized access-key/rate-limit errors once
+- Normalizes old stored access cookies into API tokens and retries recognized access-key errors once
+- Handles rate-limit errors separately, without immediately retrying or renewing the access key
 
 ## Request optimizations
 
@@ -50,8 +51,20 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Returns separate page arrays so callers cannot modify the cached page list
 - Requests only chapter numbers, titles, and dates when refreshing a chapter list, omitting unused manga titles and chapter slugs
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
-- Keeps the upstream two-requests-per-second limit
+- Limits scheduled requests to one per second to reduce bursts
 
-Search and browse retain Netsky's original implementation. Cloudflare restrictions, site outages, and server rate limits can still prevent requests. In-app compatibility, live chapter loading, and performance gains have not been verified here.
+## Rate-limit recovery
+
+- Detects HTTP 429 and rate-limit messages or codes in GraphQL errors across the shared request manager
+- Honors `Retry-After` in seconds or HTTP-date form, falling back to a 60-second cooldown when no usable value is supplied
+- Blocks further scheduled network requests during the cooldown and reports the remaining wait instead of repeatedly hitting MangaHub
+- Saves the cooldown in source state so recreating the source does not intentionally reset the wait; if saving fails, the active instance still enforces it
+- Defers one access-key renewal until the next uncached chapter request after an API-message cooldown, since MangaHub also uses these messages for exhausted access-key quotas
+- Does not renew the access key solely because of HTTP 429
+- Continues serving unexpired cached page lists during the cooldown
+
+Retry the chapter after the displayed wait; there is no automatic delayed retry. If the error keeps returning, pause bulk downloads, open the source's Cloudflare bypass, and complete any verification. The fallback cooldown is not a guarantee that MangaHub's server-side limit has expired.
+
+Search and browse retain Netsky's original queries and parsing, using the shared rate-limited request manager. Cloudflare restrictions, site outages, and server rate limits can still prevent requests. In-app compatibility, live chapter loading, and performance gains have not been verified here.
 
 See `THIRD_PARTY.md` for upstream attribution and licenses.

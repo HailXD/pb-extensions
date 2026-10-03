@@ -12,7 +12,7 @@ const ACCESS_KEY_STATE = "mhub_key";
 const ACCESS_COOKIE_NAME = "mhub_access";
 const ACCESS_KEY_REFRESH_PATH = "/chapter/the-last-human/chapter-1?reloadKey=1";
 const MAX_CHAPTER_ATTEMPTS = 2;
-const RETRYABLE_API_ERROR = /rate\s*limit|api\s*key|encryption unavailable|unauth|access.*(?:invalid|expired)/i;
+const RETRYABLE_API_ERROR = /api\s*key|encryption unavailable|unauth|access.*(?:invalid|expired)/i;
 
 function parseResponse(response, label) {
   if (response.status === 403 || response.status === 503) {
