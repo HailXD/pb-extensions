@@ -3,7 +3,7 @@ const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 1;
-const REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_STATE = "mhub_rate_limit";
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
 const MILLISECONDS_PER_SECOND = 1_000;
@@ -43,8 +43,11 @@ class Mangahub extends UPSTREAM.Mangahub {
       interceptor: {
         interceptRequest: (request) => this.prepareMangaHubRequest(request),
         interceptResponse: async (response) => {
-          await this.handleRateLimit(response);
-          return response;
+          const targetResponse = response.request?.url?.startsWith(`${SCRAPINGANT_ENDPOINT}?`)
+            ? await this.scrapingAnt.handleImageResponse(response)
+            : response;
+          await this.handleRateLimit(targetResponse);
+          return targetResponse;
         }
       }
     });
@@ -64,6 +67,11 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async prepareMangaHubRequest(request) {
     await this.assertRequestAllowed();
+    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return request;
+    if (request.url.startsWith(`${MH_CDN_DOMAIN}/`)) {
+      const proxyRequest = await this.scrapingAnt.prepareImageRequest(request, await this.requestManager.getDefaultUserAgent());
+      if (proxyRequest) return proxyRequest;
+    }
     const [userAgent, access] = await Promise.all([
       this.requestManager.getDefaultUserAgent(),
       this.getMhubAccess()
@@ -77,15 +85,6 @@ class Mangahub extends UPSTREAM.Mangahub {
       "x-mhub-access": access
     };
     return request;
-  }
-
-  async scheduleChapterRequest(request) {
-    const response = await this.scrapingAnt.schedule(
-      request,
-      () => this.prepareMangaHubRequest(request),
-      (response) => this.handleRateLimit(response)
-    );
-    return response ?? await this.requestManager.schedule(request, 1);
   }
 
   async assertRequestAllowed() {
@@ -250,7 +249,7 @@ class Mangahub extends UPSTREAM.Mangahub {
           query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
         }
       });
-      const response = await this.scheduleChapterRequest(request);
+      const response = await this.requestManager.schedule(request, 1);
       const result = parseResponse(response, "Chapter unavailable");
       const errors = result.errors?.map((error) => error.message || "Unknown API error").join(" ");
       if (errors) {

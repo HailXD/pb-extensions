@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.4, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.5, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,35 +17,36 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.4 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.4 from this repository.
+Install MangaHub 3.1.5 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.5 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
-## Optional ScrapingAnt chapter requests
+## Optional ScrapingAnt page image downloads
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.4
+1. Open MangaHub's source settings in Paperback after updating to 3.1.5
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
-3. Enable `ScrapingAnt chapter page lists`
+3. Enable `ScrapingAnt page image downloads`
 4. Open a chapter; any existing MangaHub cooldown must expire first
 
-The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling the switch returns chapter page-list requests to the direct connection without deleting the keys.
+The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling the switch returns page image requests to the direct connection without deleting the keys. The existing switch and saved keys carry over from 3.1.4.
 
-Only chapter page-list GraphQL requests go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Images, cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. ScrapingAnt receives the chapter query and MangaHub access token required to forward that request. Cloudflare cookies are not forwarded.
+Only chapter page images from `imgx.mghcdn.com` go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Chapter page lists, cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Image requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. ScrapingAnt receives the image URL and image request headers, not the MangaHub access token or Cloudflare cookies. Binary response data is preserved for Paperback's image loader.
 
-- Alternates distinct, usable keys and serializes proxy requests within the source instance, even when both keys belong to the same free account
-- On a provider HTTP 403, marks that key unavailable and tries the other eligible key; ScrapingAnt uses this status for invalid keys or exhausted credits
-- On provider HTTP 409 or 429, temporarily skips that key using `Retry-After` or a 60-second fallback, then tries the other eligible key
+- With one key entered in either field, uses only that key for every image request; empty fields and duplicate keys are ignored
+- Alternates keys only when both distinct keys are entered and usable
+- On a provider HTTP 403, marks that key unavailable for subsequent image requests; ScrapingAnt uses this status for invalid keys or exhausted credits
+- On provider HTTP 409 or 429, temporarily skips that key using `Retry-After` or a 60-second fallback; retry the failed page after the cooldown or with another available key
 - Does not rotate keys in response to a MangaHub rate limit; target status and original headers feed the existing MangaHub cooldown
-- Does not silently fall back to direct chapter requests when ScrapingAnt is enabled but unavailable
-- Does not retry every provider error with another key, avoiding unnecessary credit use on timeouts and anti-bot failures
+- Does not silently fall back to direct image requests when ScrapingAnt is enabled but unavailable
+- Leaves image scheduling and retries to Paperback; source key selection is serialized, but native image downloads may overlap and reach the provider's concurrency limit
 
 After credits renew, use `Reset ScrapingAnt key availability` to let unavailable keys be tried again. Replacing a key also resets its local availability. This button does not reset either service's actual quota or MangaHub's cooldown. Two keys may share one account's credits or concurrency limit.
 
-This is experimental and may add latency. It does not remove MangaHub's access-token requirements, solve an image-CDN limit, or guarantee that `browser=false` works with MangaHub's anti-bot protection. Disable the switch if proxying does not help. No live requests with user keys have been made during implementation.
+This is experimental and may add latency. It does not remove MangaHub's API rate limits or access-token requirements, or guarantee that ScrapingAnt can retrieve the image CDN's binary responses. Disable the switch if proxying does not help. In-app image downloads and live requests with user keys have not been verified during implementation.
 
-Provider references: [POST requests](https://docs.scrapingant.com/post-put-delete), [forwarded headers](https://docs.scrapingant.com/custom-headers), [errors and free-plan concurrency](https://docs.scrapingant.com/errors), [browser rendering](https://docs.scrapingant.com/headless-browser).
+Provider references: [request format](https://docs.scrapingant.com/request-response-format), [forwarded headers](https://docs.scrapingant.com/custom-headers), [errors and free-plan concurrency](https://docs.scrapingant.com/errors), [browser rendering](https://docs.scrapingant.com/headless-browser).
 
 ## Maintain the extension
 
