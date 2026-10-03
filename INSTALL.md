@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.5, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.6, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.5 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.5 from this repository.
+Install MangaHub 3.1.6 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.6 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -25,10 +25,10 @@ If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.5
+1. Open MangaHub's source settings in Paperback after updating to 3.1.6
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
 3. Enable `ScrapingAnt page image downloads`
-4. Open a chapter; any existing MangaHub cooldown must expire first
+4. Open a chapter or retry a failed download
 
 The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling the switch returns page image requests to the direct connection without deleting the keys. The existing switch and saved keys carry over from 3.1.4.
 
@@ -38,11 +38,11 @@ Only chapter page images from `imgx.mghcdn.com` go through ScrapingAnt, with `br
 - Alternates keys only when both distinct keys are entered and usable
 - On a provider HTTP 403, marks that key unavailable for subsequent image requests; ScrapingAnt uses this status for invalid keys or exhausted credits
 - On provider HTTP 409 or 429, temporarily skips that key using `Retry-After` or a 60-second fallback; retry the failed page after the cooldown or with another available key
-- Does not rotate keys in response to a MangaHub rate limit; target status and original headers feed the existing MangaHub cooldown
+- Reports MangaHub rate-limit responses without adding a local cooldown
 - Does not silently fall back to direct image requests when ScrapingAnt is enabled but unavailable
 - Leaves image scheduling and retries to Paperback; source key selection is serialized, but native image downloads may overlap and reach the provider's concurrency limit
 
-After credits renew, use `Reset ScrapingAnt key availability` to let unavailable keys be tried again. Replacing a key also resets its local availability. This button does not reset either service's actual quota or MangaHub's cooldown. Two keys may share one account's credits or concurrency limit.
+After credits renew, use `Reset ScrapingAnt key availability` to let unavailable keys be tried again. Replacing a key also resets its local availability. This button does not reset either service's actual quota. Two keys may share one account's credits or concurrency limit.
 
 This is experimental and may add latency. It does not remove MangaHub's API rate limits or access-token requirements, or guarantee that ScrapingAnt can retrieve the image CDN's binary responses. Disable the switch if proxying does not help. In-app image downloads and live requests with user keys have not been verified during implementation.
 
@@ -80,17 +80,17 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
 - Limits scheduled requests to one per second to reduce bursts
 
-## Rate-limit recovery
+## Rate-limit errors
 
 - Detects HTTP 429 and rate-limit messages or codes in GraphQL errors across the shared request manager
-- Honors `Retry-After` in seconds or HTTP-date form, falling back to a 60-second cooldown when no usable value is supplied
-- Blocks further scheduled network requests during the cooldown and reports the remaining wait instead of repeatedly hitting MangaHub
-- Saves the cooldown in source state so recreating the source does not intentionally reset the wait; if saving fails, the active instance still enforces it
-- Defers one access-key renewal until the next uncached chapter request after an API-message cooldown, since MangaHub also uses these messages for exhausted access-key quotas
-- Does not renew the access key solely because of HTTP 429
-- Continues serving unexpired cached page lists during the cooldown
+- Shows the server's error message when available, or HTTP 429 when no message is available
+- Labels the failing request as MangaHub API, decryption key, page image, or website
+- Does not impose a local MangaHub cooldown or block manual retries; ignores cooldown state saved by older versions
+- Does not automatically retry or renew the access key in response to a rate-limit error
+- Keeps the existing page-list cache and one-request-per-second scheduling
+- ScrapingAnt provider key cooldowns remain separate and unchanged
 
-Retry the chapter after the displayed wait; there is no automatic delayed retry. If the error keeps returning, pause bulk downloads, open the source's Cloudflare bypass, and complete any verification. The fallback cooldown is not a guarantee that MangaHub's server-side limit has expired.
+Opening a chapter first fetches its page list directly from MangaHub's API and may also fetch an access token or decryption key. ScrapingAnt only proxies the subsequent image requests, so it does not affect rate limits on those direct requests. Removing the extension's cooldown exposes the underlying server error but does not remove MangaHub's server-side limits.
 
 Search and browse retain Netsky's original queries and parsing, using the shared rate-limited request manager. Cloudflare restrictions, site outages, and server rate limits can still prevent requests. In-app compatibility, live chapter loading, and performance gains have not been verified here.
 

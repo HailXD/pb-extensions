@@ -5,10 +5,22 @@ const SCRAPINGANT_KEY_LABELS = ["ScrapingAnt key 1", "ScrapingAnt key 2"];
 const SCRAPINGANT_TIMEOUT_SECONDS = 20;
 const SCRAPINGANT_ORIGINAL_HEADER_PREFIX = "ant-original-header-";
 const SCRAPINGANT_FORWARDED_HEADERS = ["Accept", "Referer", "Origin", "User-Agent"];
+const SCRAPINGANT_DEFAULT_COOLDOWN_MS = 60_000;
+const MILLISECONDS_PER_SECOND = 1_000;
 
 function scrapingAntHeader(headers, name) {
   const value = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name)?.[1];
   return String(Array.isArray(value) ? value[0] ?? "" : value ?? "");
+}
+
+function scrapingAntCooldown(response) {
+  const value = scrapingAntHeader(response.headers, "retry-after").trim();
+  const delay = /^\d+(?:\.\d+)?$/.test(value)
+    ? Number(value) * MILLISECONDS_PER_SECOND
+    : Date.parse(value) - Date.now();
+  return Number.isFinite(delay)
+    ? Math.max(MILLISECONDS_PER_SECOND, delay)
+    : SCRAPINGANT_DEFAULT_COOLDOWN_MS;
 }
 
 class ScrapingAnt {
@@ -120,7 +132,7 @@ class ScrapingAnt {
           if (!key || index < 0) return;
           const slot = config.slots[index];
           slot.disabled = response.status === 403;
-          slot.retryAt = slot.disabled ? 0 : Date.now() + rateLimitCooldown(response);
+          slot.retryAt = slot.disabled ? 0 : Date.now() + scrapingAntCooldown(response);
           await this.stateManager.store(SCRAPINGANT_CONFIG_STATE, config);
         });
       }
