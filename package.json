@@ -1,0 +1,9 @@
+{
+  "name": "hailxd-mangahub-paperback-0.8",
+  "version": "3.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "package": "bun scripts/package.js"
+  }
+}

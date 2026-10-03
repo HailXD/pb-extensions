@@ -1,0 +1,13 @@
+{
+  "id": "Mangahub",
+  "name": "Mangahub",
+  "author": "HailXD, Netsky, Elrulia",
+  "desc": "MangaHub for Paperback 0.8 with encrypted chapter page support",
+  "website": "https://github.com/HailXD/pb-extensions",
+  "contentRating": "MATURE",
+  "version": "3.1.1",
+  "icon": "icon.png",
+  "tags": [],
+  "websiteBaseURL": "https://mangahub.io",
+  "intents": 21
+}

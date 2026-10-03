@@ -1,0 +1,47 @@
+:root {
+  color-scheme: dark;
+  --background: #111;
+  --primary: #6ad;
+  --secondary: #a9e;
+  --spacing: 1.5rem;
+  --content-width: 28rem;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--spacing);
+  background: var(--background);
+  font-family: "Spline Sans", sans-serif;
+}
+
+main {
+  display: grid;
+  gap: var(--spacing);
+  width: min(100%, var(--content-width));
+}
+
+a {
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+
+.install {
+  display: block;
+  border: 1px solid var(--primary);
+  padding: var(--spacing);
+  color: var(--primary);
+  text-align: center;
+  text-decoration: none;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 4px;
+}
