@@ -1,5 +1,5 @@
 {
-  "buildTime": "2026-10-03T16:47:11.893Z",
+  "buildTime": "2026-10-03T16:52:43.825Z",
   "sources": [
     {
       "id": "Mangahub",
@@ -8,7 +8,7 @@
       "desc": "MangaHub for Paperback 0.8 with encrypted chapter page support",
       "website": "https://github.com/HailXD/pb-extensions",
       "contentRating": "MATURE",
-      "version": "3.1.6",
+      "version": "3.1.7",
       "icon": "icon.png",
       "tags": [],
       "websiteBaseURL": "https://mangahub.io",

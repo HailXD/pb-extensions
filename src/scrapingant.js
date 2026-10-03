@@ -5,8 +5,46 @@ const SCRAPINGANT_KEY_LABELS = ["ScrapingAnt key 1", "ScrapingAnt key 2"];
 const SCRAPINGANT_TIMEOUT_SECONDS = 20;
 const SCRAPINGANT_ORIGINAL_HEADER_PREFIX = "ant-original-header-";
 const SCRAPINGANT_FORWARDED_HEADERS = ["Accept", "Referer", "Origin", "User-Agent"];
+const SCRAPINGANT_API_HEADERS = ["Content-Type", "x-mhub-access"];
 const SCRAPINGANT_DEFAULT_COOLDOWN_MS = 60_000;
 const MILLISECONDS_PER_SECOND = 1_000;
+const REQUEST_ERROR_DETAIL_LIMIT = 600;
+const SCRAPINGANT_ERROR_REASONS = {
+  403: "Invalid API key or exhausted credits",
+  409: "Concurrent request limit exceeded",
+  429: "Provider rate limit exceeded",
+  423: "Target anti-bot protection blocked the proxy request"
+};
+
+function requestJson(data) {
+  try {
+    return typeof data === "string" ? JSON.parse(data) : data;
+  } catch {
+    return null;
+  }
+}
+
+function scrapingAntParameter(url, name) {
+  try {
+    return decodeURIComponent(new RegExp(`[?&]${name}=([^&]*)`).exec(url)?.[1] ?? "");
+  } catch {
+    return "";
+  }
+}
+
+function mangaHubRequestContext(request) {
+  const proxied = request?.url?.startsWith(`${SCRAPINGANT_ENDPOINT}?`) === true;
+  const url = proxied ? scrapingAntParameter(request.url, "url") : request?.url ?? "";
+  const query = requestJson(request?.data)?.query;
+  const pageList = url === MH_API_DOMAIN && typeof query === "string" && /\bchapter\s*\(/.test(query);
+  const stage = pageList ? "Chapter page list"
+    : url.startsWith(MH_API_DOMAIN) ? "MangaHub API"
+    : url.startsWith(`${MH_CDN_DOMAIN}/`) ? "Chapter image"
+    : url.startsWith(`${MH_DOMAIN}${CHAPTER_CRYPTO_PATH}`) ? "Decryption key"
+    : url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`) ? "Access-token refresh"
+    : "MangaHub website";
+  return { proxied, pageList, stage, endpoint: url.split(/[?#]/)[0] };
+}
 
 function scrapingAntHeader(headers, name) {
   const value = Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === name)?.[1];
@@ -42,7 +80,8 @@ class ScrapingAnt {
       enabled: stored?.enabled === true,
       slots: SCRAPINGANT_KEY_LABELS.map((_, index) => ({
         disabled: stored?.slots?.[index]?.disabled === true,
-        retryAt: Number.isFinite(stored?.slots?.[index]?.retryAt) ? stored.slots[index].retryAt : 0
+        retryAt: Number.isFinite(stored?.slots?.[index]?.retryAt) ? stored.slots[index].retryAt : 0,
+        lastStatus: Number.isInteger(stored?.slots?.[index]?.lastStatus) ? stored.slots[index].lastStatus : 0
       }))
     };
   }
@@ -79,7 +118,7 @@ class ScrapingAnt {
     });
   }
 
-  prepareImageRequest(request, userAgent) {
+  prepareRequest(request, userAgent) {
     return this.enqueue(async () => {
       const config = await this.getConfig();
       if (!config.enabled) return null;
@@ -88,6 +127,7 @@ class ScrapingAnt {
       const candidates = keys.map((_, index) => index)
         .filter((index) => keys[index] && keys.indexOf(keys[index]) === index);
       const available = candidates.filter((index) => !config.slots[index].disabled && config.slots[index].retryAt <= Date.now());
+      const context = mangaHubRequestContext(request);
       if (available.length) {
         const index = available[this.nextKey % available.length];
         this.nextKey = available.length > 1 ? (this.nextKey + 1) % available.length : 0;
@@ -97,34 +137,68 @@ class ScrapingAnt {
           Origin: MH_DOMAIN,
           "User-Agent": userAgent
         };
-        const headers = {};
-        for (const name of SCRAPINGANT_FORWARDED_HEADERS) {
+        const headers = context.pageList ? { "Content-Type": "application/json" } : {};
+        const forwardedHeaders = context.pageList
+          ? [...SCRAPINGANT_FORWARDED_HEADERS, ...SCRAPINGANT_API_HEADERS]
+          : SCRAPINGANT_FORWARDED_HEADERS;
+        for (const name of forwardedHeaders) {
           const value = scrapingAntHeader(originalHeaders, name.toLowerCase());
           if (value) headers[`Ant-${name}`] = value;
         }
         return App.createRequest({
           url: `${SCRAPINGANT_ENDPOINT}?url=${encodeURIComponent(request.url)}&x-api-key=${encodeURIComponent(keys[index])}&browser=false&proxy_type=datacenter&timeout=${SCRAPINGANT_TIMEOUT_SECONDS}`,
-          method: "GET",
+          method: request.method,
           headers,
+          ...(request.data == null ? {} : { data: typeof request.data === "string" ? request.data : JSON.stringify(request.data) }),
           cookies: []
         });
       }
-      const retryTimes = candidates.filter((index) => !config.slots[index].disabled)
-        .map((index) => config.slots[index].retryAt);
-      if (retryTimes.length) {
-        const seconds = Math.max(1, Math.ceil((Math.min(...retryTimes) - Date.now()) / MILLISECONDS_PER_SECOND));
-        throw new Error(`ScrapingAnt keys are temporarily busy or rate-limited. Wait ${seconds} seconds before retrying.`);
-      }
-      throw new Error("ScrapingAnt keys are invalid or out of credits. Replace them in source settings, or use Reset ScrapingAnt key availability after credits renew. You can also disable ScrapingAnt.");
+      const reasons = candidates.map((index) => {
+        const slot = config.slots[index];
+        const reason = SCRAPINGANT_ERROR_REASONS[slot.lastStatus] || "Previously marked unavailable or rate-limited";
+        const seconds = Math.max(1, Math.ceil((slot.retryAt - Date.now()) / MILLISECONDS_PER_SECOND));
+        return `Key ${index + 1}: ${reason}${slot.lastStatus ? ` (HTTP ${slot.lastStatus})` : ""}. ${slot.disabled ? "Replace the key or reset key availability after credits renew." : `Local cooldown: ${seconds}s remaining.`}`;
+      });
+      throw new Error(`ScrapingAnt local key availability blocked the request\nRequest: ${context.stage}\nNo HTTP request sent\n${reasons.join("\n")}`);
     });
   }
 
-  async handleImageResponse(response) {
+  async requestError(response, service, fallback) {
+    const context = mangaHubRequestContext(response.request);
+    const keys = await this.getKeys().catch(() => []);
+    const requestKey = context.proxied ? scrapingAntParameter(response.request.url, "x-api-key") : "";
+    const index = requestKey ? keys.indexOf(requestKey) : -1;
+    const result = requestJson(response.data);
+    const messages = Array.isArray(result?.errors)
+      ? result.errors.map((error) => [error?.message, error?.extensions?.code].filter((value) => typeof value === "string").join(" / ")).filter(Boolean).join("; ")
+      : "";
+    const plainText = typeof response.data === "string" && !result && !/<[a-z!]/i.test(response.data) ? response.data.trim() : "";
+    const detail = messages || [result?.message, result?.error, result?.detail].find((value) => typeof value === "string" && value) || plainText || fallback;
+    const secrets = [...keys, requestKey, ...Object.entries(response.request?.headers ?? {})
+      .filter(([name]) => /cookie|authorization|api-key|mhub-access/i.test(name))
+      .flatMap(([, value]) => [String(value), ...Array.from(String(value).matchAll(/(?:^|;\s*)[^=;]+=([^;]+)/g), (match) => match[1])])].filter((value) => value && value !== "/");
+    const redact = (value) => secrets.reduce((text, secret) => text.split(secret).join("[redacted]").split(encodeURIComponent(secret)).join("[redacted]"), String(value))
+      .replace(/https?:\/\/[^\s"<>]+/gi, (url) => url.split(/[?#]/)[0])
+      .replace(/[\r\n]+/g, " ").slice(0, REQUEST_ERROR_DETAIL_LIMIT);
+    const retryAfter = scrapingAntHeader(response.headers, context.proxied && service === "MangaHub" ? `${SCRAPINGANT_ORIGINAL_HEADER_PREFIX}retry-after` : "retry-after");
+    const lines = [
+      `${service} request failed`,
+      `Request: ${context.stage}`,
+      `Route: ${context.proxied ? `ScrapingAnt${index >= 0 ? ` key ${index + 1}` : ""}` : "Direct"}`,
+      `Endpoint: ${response.request?.method ?? "GET"} ${context.endpoint}`,
+      `HTTP: ${response.status}`,
+      `Reason: ${redact(detail)}`,
+      ...(retryAfter ? [`Retry-After: ${redact(retryAfter)}`] : [])
+    ];
+    return new Error(lines.join("\n"));
+  }
+
+  async handleResponse(response) {
     const pageStatus = Number(scrapingAntHeader(response.headers, "ant-page-status-code"));
     const targetStatus = Number.isInteger(pageStatus) && pageStatus >= 100 && pageStatus < 600 ? pageStatus : null;
     if (response.status >= 400 && !(targetStatus >= 400)) {
       if (response.status === 403 || response.status === 409 || response.status === 429) {
-        const key = decodeURIComponent(/[?&]x-api-key=([^&]*)/.exec(response.request.url)?.[1] ?? "");
+        const key = scrapingAntParameter(response.request.url, "x-api-key");
         await this.enqueue(async () => {
           const config = await this.getConfig();
           const keys = await this.getKeys();
@@ -132,11 +206,12 @@ class ScrapingAnt {
           if (!key || index < 0) return;
           const slot = config.slots[index];
           slot.disabled = response.status === 403;
+          slot.lastStatus = response.status;
           slot.retryAt = slot.disabled ? 0 : Date.now() + scrapingAntCooldown(response);
           await this.stateManager.store(SCRAPINGANT_CONFIG_STATE, config);
-        });
+        }).catch(() => {});
       }
-      throw new Error(`ScrapingAnt returned HTTP ${response.status}. Retry the page later, check key availability, or disable ScrapingAnt in source settings.`);
+      throw await this.requestError(response, "ScrapingAnt", SCRAPINGANT_ERROR_REASONS[response.status] || "The provider did not supply an error reason");
     }
     const targetHeaders = {};
     for (const [name, value] of Object.entries(response.headers ?? {})) {
@@ -162,7 +237,7 @@ function createScrapingAntMenu(client, onChange) {
     rows: async () => [
       App.createDUISwitch({
         id: SCRAPINGANT_CONFIG_STATE,
-        label: "ScrapingAnt page image downloads",
+        label: "ScrapingAnt page lists and images",
         value: App.createDUIBinding({
           get: async () => (await client.getConfig()).enabled,
           set: async (value) => {

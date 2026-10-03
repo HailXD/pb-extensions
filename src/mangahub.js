@@ -19,7 +19,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         interceptRequest: (request) => this.prepareMangaHubRequest(request),
         interceptResponse: async (response) => {
           const targetResponse = response.request?.url?.startsWith(`${SCRAPINGANT_ENDPOINT}?`)
-            ? await this.scrapingAnt.handleImageResponse(response)
+            ? await this.scrapingAnt.handleResponse(response)
             : response;
           await this.handleRateLimit(targetResponse);
           return targetResponse;
@@ -43,7 +43,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   async prepareMangaHubRequest(request) {
     if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return request;
     if (request.url.startsWith(`${MH_CDN_DOMAIN}/`)) {
-      const proxyRequest = await this.scrapingAnt.prepareImageRequest(request, await this.requestManager.getDefaultUserAgent());
+      const proxyRequest = await this.scrapingAnt.prepareRequest(request, await this.requestManager.getDefaultUserAgent());
       if (proxyRequest) return proxyRequest;
     }
     const [userAgent, access] = await Promise.all([
@@ -57,31 +57,20 @@ class Mangahub extends UPSTREAM.Mangahub {
       "User-Agent": userAgent,
       "x-mhub-access": access
     };
+    if (mangaHubRequestContext(request).pageList) {
+      const proxyRequest = await this.scrapingAnt.prepareRequest(request, userAgent);
+      if (proxyRequest) return proxyRequest;
+    }
     return request;
   }
 
   async handleRateLimit(response) {
-    const result = (() => {
-      try {
-        return JSON.parse(response.data);
-      } catch {
-        return null;
-      }
-    })();
-    const limited = Array.isArray(result?.errors) && result.errors.some((error) =>
+    const result = requestJson(response.data);
+    const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
       RATE_LIMIT_ERROR.test(error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
-    );
+    )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
     if (response.status !== 429 && !limited) return;
-    const url = response.request?.url ?? "";
-    const source = url.startsWith(MH_API_DOMAIN) ? "MangaHub API"
-      : url.startsWith(`${MH_DOMAIN}${CHAPTER_CRYPTO_PATH}`) ? "MangaHub decryption key"
-      : url.startsWith(`${MH_CDN_DOMAIN}/`) || url.startsWith(`${SCRAPINGANT_ENDPOINT}?`) ? "MangaHub page image"
-      : "MangaHub website";
-    const messages = Array.isArray(result?.errors)
-      ? result.errors.map((error) => error?.message || error?.extensions?.code).filter(Boolean).join(" ")
-      : "";
-    const detail = messages || [result?.message, result?.error, result?.detail].find((value) => typeof value === "string" && value);
-    throw new Error(`${source}: ${detail || "HTTP 429 (Too Many Requests)"}`);
+    throw await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
   }
 
   shareRequest(key, load) {
