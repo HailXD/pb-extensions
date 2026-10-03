@@ -41,22 +41,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       requestsPerSecond: REQUESTS_PER_SECOND,
       requestTimeout: REQUEST_TIMEOUT_MS,
       interceptor: {
-        interceptRequest: async (request) => {
-          await this.assertRequestAllowed();
-          const [userAgent, access] = await Promise.all([
-            this.requestManager.getDefaultUserAgent(),
-            this.getMhubAccess()
-          ]);
-          await this.assertRequestAllowed();
-          request.headers = {
-            ...request.headers ?? {},
-            Referer: `${MH_DOMAIN}/`,
-            Origin: MH_DOMAIN,
-            "User-Agent": userAgent,
-            "x-mhub-access": access
-          };
-          return request;
-        },
+        interceptRequest: (request) => this.prepareMangaHubRequest(request),
         interceptResponse: async (response) => {
           await this.handleRateLimit(response);
           return response;
@@ -64,12 +49,43 @@ class Mangahub extends UPSTREAM.Mangahub {
       }
     });
     this.chapterCrypto = new ChapterCrypto(this.requestManager);
+    this.scrapingAnt = new ScrapingAnt(this.stateManager);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
       const cookie = /(?:^|;\s*)mhub_access=([^;]*)/.exec(stored);
       return cookie ? cookie[1] : stored;
     });
+  }
+
+  async getSourceMenu() {
+    return createScrapingAntMenu(this.scrapingAnt, () => this.chapterPagesCache.clear());
+  }
+
+  async prepareMangaHubRequest(request) {
+    await this.assertRequestAllowed();
+    const [userAgent, access] = await Promise.all([
+      this.requestManager.getDefaultUserAgent(),
+      this.getMhubAccess()
+    ]);
+    await this.assertRequestAllowed();
+    request.headers = {
+      ...request.headers ?? {},
+      Referer: `${MH_DOMAIN}/`,
+      Origin: MH_DOMAIN,
+      "User-Agent": userAgent,
+      "x-mhub-access": access
+    };
+    return request;
+  }
+
+  async scheduleChapterRequest(request) {
+    const response = await this.scrapingAnt.schedule(
+      request,
+      () => this.prepareMangaHubRequest(request),
+      (response) => this.handleRateLimit(response)
+    );
+    return response ?? await this.requestManager.schedule(request, 1);
   }
 
   async assertRequestAllowed() {
@@ -234,7 +250,7 @@ class Mangahub extends UPSTREAM.Mangahub {
           query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
         }
       });
-      const response = await this.requestManager.schedule(request, 1);
+      const response = await this.scheduleChapterRequest(request);
       const result = parseResponse(response, "Chapter unavailable");
       const errors = result.errors?.map((error) => error.message || "Unknown API error").join(" ");
       if (errors) {
@@ -261,7 +277,8 @@ const MangahubInfo = {
   author: SOURCE_INFO.author,
   authorWebsite: SOURCE_INFO.website,
   description: SOURCE_INFO.desc,
-  sourceTags: SOURCE_INFO.tags
+  sourceTags: SOURCE_INFO.tags,
+  intents: SOURCE_INFO.intents
 };
 
 _Sources = { Mangahub, MangahubInfo };
