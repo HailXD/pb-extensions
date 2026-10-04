@@ -174,10 +174,10 @@ class Mangahub extends UPSTREAM.Mangahub {
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
         method: "GET"
       }), 1);
-      this.lastCheckStatus = `${ext}:${response.status}`;
-      return response.status === 200 || response.status === 206;
+      this.lastCheckStatus += ` ${ext}:${response.status}`;
+      return response.status < 400;
     } catch (err) {
-      this.lastCheckError = `${ext}:${err?.message || err}`;
+      this.lastCheckError += ` ${ext}:${err?.message || err}`;
       return false;
     }
   }

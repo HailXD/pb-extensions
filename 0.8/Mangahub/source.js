@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.18","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.19","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2658,10 +2658,10 @@ class Mangahub extends UPSTREAM.Mangahub {
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
         method: "GET"
       }), 1);
-      this.lastCheckStatus = `${ext}:${response.status}`;
-      return response.status === 200 || response.status === 206;
+      this.lastCheckStatus += ` ${ext}:${response.status}`;
+      return response.status < 400;
     } catch (err) {
-      this.lastCheckError = `${ext}:${err?.message || err}`;
+      this.lastCheckError += ` ${ext}:${err?.message || err}`;
       return false;
     }
   }
