@@ -200,7 +200,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     try {
       const response = await this.requestManager.schedule(App.createRequest({
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
-        method: "GET"
+        method: "HEAD"
       }), 1);
       this.lastCheckStatus += ` ${ext}:${response.status}`;
       return response.status < 400;
