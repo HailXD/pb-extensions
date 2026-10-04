@@ -3,7 +3,7 @@ const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
-const CDN_EXTENSIONS = [".jpg", ".png", ".webp", ".jpeg"];
+const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -211,11 +211,9 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async resolveExt(slug, number, page, failedExt = null) {
-    for (const candidate of CDN_EXTENSIONS) {
-      if (candidate === failedExt) continue;
-      if (await this.checkPage(slug, number, page, candidate)) return candidate;
-    }
-    return null;
+    const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
+    const results = await Promise.all(candidates.map((candidate) => this.checkPage(slug, number, page, candidate)));
+    return candidates.find((candidate, index) => results[index]) ?? null;
   }
 
   async loadChapterPages(slug, number) {
