@@ -210,39 +210,59 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
   }
 
+  async resolveExt(slug, number, page) {
+    for (const candidate of CDN_EXTENSIONS) {
+      if (await this.checkPage(slug, number, page, candidate)) return candidate;
+    }
+    return null;
+  }
+
   async loadChapterPages(slug, number) {
-    let ext = null;
-    let startPage = 1;
     this.lastCheckStatus = "";
     this.lastCheckError = "";
-    for (const candidate of CDN_EXTENSIONS) {
-      if (await this.checkPage(slug, number, 1, candidate)) {
-        ext = candidate;
-        startPage = 1;
-        break;
-      }
-      if (await this.checkPage(slug, number, 0, candidate)) {
-        ext = candidate;
-        startPage = 0;
-        break;
-      }
+    let startPage = 1;
+    let ext1 = await this.resolveExt(slug, number, 1);
+    if (!ext1) {
+      ext1 = await this.resolveExt(slug, number, 0);
+      if (ext1) startPage = 0;
     }
-    if (!ext) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
-    let low = startPage;
-    let high = 16;
-    while (await this.checkPage(slug, number, high, ext)) {
-      low = high;
-      high *= 2;
+    if (!ext1) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
+
+    const secondPage = startPage + 1;
+    let mainExt = ext1;
+    if (!(await this.checkPage(slug, number, secondPage, ext1))) {
+      const ext2 = await this.resolveExt(slug, number, secondPage);
+      if (ext2) mainExt = ext2;
     }
-    while (low < high - 1) {
-      const mid = Math.floor((low + high) / 2);
-      if (await this.checkPage(slug, number, mid, ext)) {
-        low = mid;
-      } else {
-        high = mid;
+
+    let low = secondPage;
+    if (mainExt !== ext1 || (await this.checkPage(slug, number, secondPage, mainExt))) {
+      let high = 16;
+      while (await this.checkPage(slug, number, high, mainExt)) {
+        low = high;
+        high *= 2;
       }
+      while (low < high - 1) {
+        const mid = Math.floor((low + high) / 2);
+        if (await this.checkPage(slug, number, mid, mainExt)) {
+          low = mid;
+        } else {
+          high = mid;
+        }
+      }
+    } else {
+      low = startPage;
     }
-    return Array.from({ length: low - startPage + 1 }, (_, index) => `${MH_CDN_DOMAIN}/${slug}/${number}/${index + startPage}${ext}`);
+
+    const trailingExt = await this.resolveExt(slug, number, low + 1);
+    const pages = [];
+    for (let i = startPage; i <= low; i++) {
+      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${i}${i === startPage ? ext1 : mainExt}`);
+    }
+    if (trailingExt) {
+      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${low + 1}${trailingExt}`);
+    }
+    return pages;
   }
 }
 
