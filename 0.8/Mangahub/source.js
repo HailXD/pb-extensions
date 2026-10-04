@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.22","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.23","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2694,8 +2694,9 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
   }
 
-  async resolveExt(slug, number, page) {
+  async resolveExt(slug, number, page, failedExt = null) {
     for (const candidate of CDN_EXTENSIONS) {
+      if (candidate === failedExt) continue;
       if (await this.checkPage(slug, number, page, candidate)) return candidate;
     }
     return null;
@@ -2712,39 +2713,15 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     if (!ext1) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
 
-    const secondPage = startPage + 1;
-    let mainExt = ext1;
-    if (!(await this.checkPage(slug, number, secondPage, ext1))) {
-      const ext2 = await this.resolveExt(slug, number, secondPage);
-      if (ext2) mainExt = ext2;
-    }
-
-    let low = secondPage;
-    if (mainExt !== ext1 || (await this.checkPage(slug, number, secondPage, mainExt))) {
-      let high = 16;
-      while (await this.checkPage(slug, number, high, mainExt)) {
-        low = high;
-        high *= 2;
+    const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
+    let currentExt = ext1;
+    for (let page = startPage + 1; ; page++) {
+      if (!(await this.checkPage(slug, number, page, currentExt))) {
+        const nextExt = await this.resolveExt(slug, number, page, currentExt);
+        if (!nextExt) break;
+        currentExt = nextExt;
       }
-      while (low < high - 1) {
-        const mid = Math.floor((low + high) / 2);
-        if (await this.checkPage(slug, number, mid, mainExt)) {
-          low = mid;
-        } else {
-          high = mid;
-        }
-      }
-    } else {
-      low = startPage;
-    }
-
-    const trailingExt = await this.resolveExt(slug, number, low + 1);
-    const pages = [];
-    for (let i = startPage; i <= low; i++) {
-      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${i}${i === startPage ? ext1 : mainExt}`);
-    }
-    if (trailingExt) {
-      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${low + 1}${trailingExt}`);
+      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${currentExt}`);
     }
     return pages;
   }
