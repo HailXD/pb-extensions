@@ -82,7 +82,7 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Returns separate page arrays so callers cannot modify the cached page list
 - Requests only chapter numbers, titles, and dates when refreshing a chapter list, omitting unused manga titles and chapter slugs
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
-- Limits API requests to 10 per second and CDN probes to 60 per second, with a rolling eight-page probe window
+- Limits API requests to 10 per second and uses a 1,000-per-second CDN probe ceiling to minimize pacing, with a rolling eight-page probe window
 - Separately serializes ScrapingAnt page lists and images per distinct key, allowing up to two concurrent requests with two usable keys; this is an in-flight limit, not just request spacing
 
 ## Rate-limit errors
