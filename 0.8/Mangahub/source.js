@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.17","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.18","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2658,8 +2658,10 @@ class Mangahub extends UPSTREAM.Mangahub {
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
         method: "GET"
       }), 1);
-      return response.status === 200;
-    } catch {
+      this.lastCheckStatus = `${ext}:${response.status}`;
+      return response.status === 200 || response.status === 206;
+    } catch (err) {
+      this.lastCheckError = `${ext}:${err?.message || err}`;
       return false;
     }
   }
@@ -2667,6 +2669,8 @@ class Mangahub extends UPSTREAM.Mangahub {
   async loadChapterPages(slug, number) {
     let ext = null;
     let startPage = 1;
+    this.lastCheckStatus = "";
+    this.lastCheckError = "";
     for (const candidate of CDN_EXTENSIONS) {
       if (await this.checkPage(slug, number, 1, candidate)) {
         ext = candidate;
@@ -2679,7 +2683,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         break;
       }
     }
-    if (!ext) throw new Error(`Chapter pages unavailable on CDN: ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
+    if (!ext) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
     let low = startPage;
     let high = 16;
     while (await this.checkPage(slug, number, high, ext)) {
