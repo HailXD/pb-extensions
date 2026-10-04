@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.26","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.27","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2483,12 +2483,13 @@ class ChapterCrypto {
 }
 
 const UPSTREAM = ROOT.Sources;
-const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
+const CHAPTER_PAGES_CACHE_TTL_MS = 6 * 60 * 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
 const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
-const CDN_PAGE_PROBE_BATCH_SIZE = 8;
+const CDN_REQUESTS_PER_SECOND = 30;
+const CDN_PAGE_PROBE_WINDOW_SIZE = 24;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
 const CDN_PROBE_RANGE = "bytes=0-0";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -2523,7 +2524,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       }
     });
     this.cdnRequestManager = App.createRequestManager({
-      requestsPerSecond: REQUESTS_PER_SECOND,
+      requestsPerSecond: CDN_REQUESTS_PER_SECOND,
       requestTimeout: CDN_PROBE_TIMEOUT_MS,
       interceptor: {
         interceptRequest: async (request) => {
@@ -2743,19 +2744,23 @@ class Mangahub extends UPSTREAM.Mangahub {
 
     const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
     let currentExt = ext1;
-    for (let firstPage = startPage + 1; ; firstPage += CDN_PAGE_PROBE_BATCH_SIZE) {
-      const batchExt = currentExt;
-      const checks = Array.from({ length: CDN_PAGE_PROBE_BATCH_SIZE }, (_, offset) =>
-        this.checkPage(slug, number, firstPage + offset, batchExt)
-      );
-      for (let offset = 0; offset < checks.length; offset++) {
-        const page = firstPage + offset;
-        const exists = await checks[offset];
-        const ext = exists === true ? batchExt : await this.resolveExt(slug, number, page, exists === false ? batchExt : null);
-        if (!ext) return pages;
-        currentExt = ext;
-        pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
-      }
+    let nextPage = startPage + 1;
+    const pending = new Map();
+    const queueNextPage = () => {
+      const page = nextPage++;
+      const ext = currentExt;
+      pending.set(page, { ext, check: this.checkPage(slug, number, page, ext) });
+    };
+    for (let offset = 0; offset < CDN_PAGE_PROBE_WINDOW_SIZE; offset++) queueNextPage();
+    for (let page = startPage + 1; ; page++) {
+      const probe = pending.get(page);
+      const exists = await probe.check;
+      pending.delete(page);
+      const ext = exists === true ? probe.ext : await this.resolveExt(slug, number, page, exists === false ? probe.ext : null);
+      if (!ext) return pages;
+      currentExt = ext;
+      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
+      queueNextPage();
     }
   }
 }
