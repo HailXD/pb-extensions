@@ -2,8 +2,7 @@ const UPSTREAM = ROOT.Sources;
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
-const REQUESTS_PER_SECOND = 1;
-const CDN_REQUESTS_PER_SECOND = 20;
+const REQUESTS_PER_SECOND = 10;
 const CDN_EXTENSIONS = [".jpg", ".png", ".webp"];
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
@@ -34,10 +33,6 @@ class Mangahub extends UPSTREAM.Mangahub {
           return response;
         }
       }
-    });
-    this.cdnRequestManager = App.createRequestManager({
-      requestsPerSecond: CDN_REQUESTS_PER_SECOND,
-      requestTimeout: REQUEST_TIMEOUT_MS
     });
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
@@ -153,7 +148,8 @@ class Mangahub extends UPSTREAM.Mangahub {
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const cacheKey = JSON.stringify(["pages", mangaId, number]);
+    const slug = (() => { try { return decodeURIComponent(mangaId); } catch { return mangaId; } })();
+    const cacheKey = JSON.stringify(["pages", slug, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.chapterPagesCache.delete(cacheKey);
@@ -162,7 +158,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     this.chapterPagesCache.delete(cacheKey);
     const pages = await this.shareRequest(cacheKey, async () => {
-      const pages = await this.loadChapterPages(mangaId, number);
+      const pages = await this.loadChapterPages(slug, number);
       this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
       while (this.chapterPagesCache.size > CHAPTER_PAGES_CACHE_LIMIT) {
         this.chapterPagesCache.delete(this.chapterPagesCache.keys().next().value);
@@ -172,23 +168,22 @@ class Mangahub extends UPSTREAM.Mangahub {
     return App.createChapterDetails({ id: chapterId, mangaId, pages: pages.slice() });
   }
 
-  async checkPage(mangaId, number, page, ext) {
+  async checkPage(slug, number, page, ext) {
     try {
-      const response = await this.cdnRequestManager.schedule(App.createRequest({
-        url: `${MH_CDN_DOMAIN}/${mangaId}/${number}/${page}${ext}`,
-        method: "HEAD",
-        headers: { Range: "bytes=0-0" }
+      const response = await this.requestManager.schedule(App.createRequest({
+        url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
+        method: "GET"
       }), 1);
-      return response.status === 200 || response.status === 206;
+      return response.status === 200;
     } catch {
       return false;
     }
   }
 
-  async loadChapterPages(mangaId, number) {
+  async loadChapterPages(slug, number) {
     let ext = null;
     for (const candidate of CDN_EXTENSIONS) {
-      if (await this.checkPage(mangaId, number, 1, candidate)) {
+      if (await this.checkPage(slug, number, 1, candidate)) {
         ext = candidate;
         break;
       }
@@ -196,19 +191,19 @@ class Mangahub extends UPSTREAM.Mangahub {
     if (!ext) throw new Error("Chapter pages unavailable on CDN");
     let low = 1;
     let high = 16;
-    while (await this.checkPage(mangaId, number, high, ext)) {
+    while (await this.checkPage(slug, number, high, ext)) {
       low = high;
       high *= 2;
     }
     while (low < high - 1) {
       const mid = Math.floor((low + high) / 2);
-      if (await this.checkPage(mangaId, number, mid, ext)) {
+      if (await this.checkPage(slug, number, mid, ext)) {
         low = mid;
       } else {
         high = mid;
       }
     }
-    return Array.from({ length: low }, (_, index) => `${MH_CDN_DOMAIN}/${mangaId}/${number}/${index + 1}${ext}`);
+    return Array.from({ length: low }, (_, index) => `${MH_CDN_DOMAIN}/${slug}/${number}/${index + 1}${ext}`);
   }
 }
 
