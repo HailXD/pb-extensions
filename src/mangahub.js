@@ -6,6 +6,8 @@ const REQUESTS_PER_SECOND = 1;
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
+class MangaHubRateLimitError extends Error {}
+
 class Mangahub extends UPSTREAM.Mangahub {
   constructor() {
     super();
@@ -21,7 +23,7 @@ class Mangahub extends UPSTREAM.Mangahub {
           const targetResponse = response.request?.url?.startsWith(`${SCRAPINGANT_ENDPOINT}?`)
             ? await this.scrapingAnt.handleResponse(response)
             : response;
-          await this.handleRateLimit(targetResponse);
+          if (!mangaHubRequestContext(targetResponse.request).pageList) await this.handleRateLimit(targetResponse);
           return targetResponse;
         }
       }
@@ -70,7 +72,8 @@ class Mangahub extends UPSTREAM.Mangahub {
       RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
     )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
     if (response.status !== 429 && !limited) return;
-    throw await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
+    const error = await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
+    throw new MangaHubRateLimitError(error.message);
   }
 
   shareRequest(key, load) {
@@ -174,20 +177,31 @@ class Mangahub extends UPSTREAM.Mangahub {
     return App.createChapterDetails({ id: chapterId, mangaId, pages: pages.slice() });
   }
 
+  async requestChapterPages(mangaId, number) {
+    const request = App.createRequest({
+      url: MH_API_DOMAIN,
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      data: {
+        query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
+      }
+    });
+    const response = await this.requestManager.schedule(request, 1);
+    await this.handleRateLimit(response);
+    return response;
+  }
+
   async loadChapterPages(mangaId, number) {
     if (this.pendingAccessKey) await this.pendingAccessKey;
     if (!await this.getMhubAccess()) await this.refreshAPIKey();
+    let refreshedAfterRateLimit = false;
     for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
-      const request = App.createRequest({
-        url: MH_API_DOMAIN,
-        method: "POST",
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        data: {
-          query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
-        }
+      const response = await this.requestChapterPages(mangaId, number).catch(async (error) => {
+        if (!(error instanceof MangaHubRateLimitError) || refreshedAfterRateLimit) throw error;
+        refreshedAfterRateLimit = true;
+        await this.refreshAPIKey();
+        return this.requestChapterPages(mangaId, number);
       });
-      const response = await this.requestManager.schedule(request, 1);
-      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapter unavailable");
       const errors = result.errors?.map((error) => typeof error === "string" ? error : error.message || "Unknown API error").join(" ");
       if (errors) {
