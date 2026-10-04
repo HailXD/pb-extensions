@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.13","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.14","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2493,7 +2493,7 @@ const SCRAPINGANT_TOGGLES = [
 const SCRAPINGANT_TIMEOUT_SECONDS = 20;
 const SCRAPINGANT_ORIGINAL_HEADER_PREFIX = "ant-original-header-";
 const SCRAPINGANT_FORWARDED_HEADERS = ["Accept", "Referer", "Origin", "User-Agent"];
-const SCRAPINGANT_API_HEADERS = ["Content-Type", "x-mhub-access"];
+const SCRAPINGANT_API_HEADERS = ["Content-Type"];
 const SCRAPINGANT_DEFAULT_COOLDOWN_MS = 60_000;
 const SCRAPINGANT_SLOT_TIMEOUT_MS = 60_000;
 const SCRAPINGANT_REQUEST_ID_HEADER = "x-mangahub-proxy-request";
@@ -2528,17 +2528,18 @@ function mangaHubRequestContext(request) {
   const query = requestJson(request?.data)?.query;
   const pageList = url === MH_API_DOMAIN && typeof query === "string" && /\bchapter\s*\(/.test(query);
   const image = url.startsWith(`${MH_CDN_DOMAIN}/`);
+  const accessRefresh = url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`);
   const stage = pageList ? "Chapter page list"
     : url.startsWith(MH_API_DOMAIN) ? "MangaHub API"
     : image ? "Chapter image"
     : url.startsWith(`${MH_DOMAIN}${CHAPTER_CRYPTO_PATH}`) ? "Decryption key"
-    : url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`) ? "Access-token refresh"
+    : accessRefresh ? "Access-token refresh"
     : "MangaHub website";
-  return { proxied, pageList, image, stage, endpoint: url.split(/[?#]/)[0] };
+  return { proxied, pageList, image, accessRefresh, stage, endpoint: url.split(/[?#]/)[0] };
 }
 
 function scrapingAntEnabled(config, context) {
-  return (context.pageList && config.pageLists) || (context.image && config.images);
+  return (context.pageList && config.pageLists) || (context.image && config.images) || (context.accessRefresh && config.pageLists);
 }
 
 function scrapingAntHeader(headers, name) {
@@ -2845,6 +2846,8 @@ const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 1;
+const CDN_REQUESTS_PER_SECOND = 20;
+const CDN_EXTENSIONS = [".jpg", ".png", ".webp"];
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -2869,6 +2872,10 @@ class Mangahub extends UPSTREAM.Mangahub {
           return targetResponse;
         }
       }
+    });
+    this.cdnRequestManager = App.createRequestManager({
+      requestsPerSecond: CDN_REQUESTS_PER_SECOND,
+      requestTimeout: REQUEST_TIMEOUT_MS
     });
     this.chapterCrypto = new ChapterCrypto(this.requestManager);
     this.scrapingAnt = new ScrapingAnt(this.stateManager, REQUEST_TIMEOUT_MS);
@@ -2902,7 +2909,8 @@ class Mangahub extends UPSTREAM.Mangahub {
       "User-Agent": userAgent,
       "x-mhub-access": access
     };
-    if (mangaHubRequestContext(request).pageList) {
+    const context = mangaHubRequestContext(request);
+    if (context.pageList || context.accessRefresh) {
       const proxyRequest = await this.scrapingAnt.prepareRequest(request, userAgent);
       if (proxyRequest) return proxyRequest;
     }
@@ -3020,48 +3028,43 @@ class Mangahub extends UPSTREAM.Mangahub {
     return App.createChapterDetails({ id: chapterId, mangaId, pages: pages.slice() });
   }
 
-  async requestChapterPages(mangaId, number) {
-    const request = App.createRequest({
-      url: MH_API_DOMAIN,
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      data: {
-        query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
-      }
-    });
-    const response = await this.requestManager.schedule(request, 1);
-    await this.handleRateLimit(response);
-    return response;
+  async checkPage(mangaId, number, page, ext) {
+    try {
+      const response = await this.cdnRequestManager.schedule(App.createRequest({
+        url: `${MH_CDN_DOMAIN}/${mangaId}/${number}/${page}${ext}`,
+        method: "HEAD",
+        headers: { Range: "bytes=0-0" }
+      }), 1);
+      return response.status === 200 || response.status === 206;
+    } catch {
+      return false;
+    }
   }
 
   async loadChapterPages(mangaId, number) {
-    if (this.pendingAccessKey) await this.pendingAccessKey;
-    if (!await this.getMhubAccess()) await this.refreshAPIKey();
-    let refreshedAfterRateLimit = false;
-    for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
-      const response = await this.requestChapterPages(mangaId, number).catch(async (error) => {
-        if (!(error instanceof MangaHubRateLimitError) || refreshedAfterRateLimit) throw error;
-        refreshedAfterRateLimit = true;
-        await this.refreshAPIKey();
-        return this.requestChapterPages(mangaId, number);
-      });
-      const result = parseResponse(response, "Chapter unavailable");
-      const errors = result.errors?.map((error) => typeof error === "string" ? error : error.message || "Unknown API error").join(" ");
-      if (errors) {
-        if (attempt + 1 < MAX_CHAPTER_ATTEMPTS && RETRYABLE_API_ERROR.test(errors)) {
-          await this.refreshAPIKey();
-          continue;
-        }
-        throw await this.scrapingAnt.requestError(response, "MangaHub", errors);
-      }
-      try {
-        return await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);
-      } catch (error) {
-        if (error instanceof ChapterKeyMismatchError && attempt + 1 < MAX_CHAPTER_ATTEMPTS) continue;
-        throw error;
+    let ext = null;
+    for (const candidate of CDN_EXTENSIONS) {
+      if (await this.checkPage(mangaId, number, 1, candidate)) {
+        ext = candidate;
+        break;
       }
     }
-    throw new Error("MangaHub could not load this chapter. Please try again.");
+    if (!ext) throw new Error("Chapter pages unavailable on CDN");
+    let low = 1;
+    let high = 16;
+    while (await this.checkPage(mangaId, number, high, ext)) {
+      low = high;
+      high *= 2;
+    }
+    while (low < high - 1) {
+      const mid = Math.floor((low + high) / 2);
+      if (await this.checkPage(mangaId, number, mid, ext)) {
+        low = mid;
+      } else {
+        high = mid;
+      }
+    }
+    return Array.from({ length: low }, (_, index) => `${MH_CDN_DOMAIN}/${mangaId}/${number}/${index + 1}${ext}`);
   }
 }
 
