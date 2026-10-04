@@ -2,6 +2,10 @@ const SCRAPINGANT_ENDPOINT = "https://api.scrapingant.com/v2/general";
 const SCRAPINGANT_CONFIG_STATE = "scrapingant_config";
 const SCRAPINGANT_KEYS_STATE = "scrapingant_keys";
 const SCRAPINGANT_KEY_LABELS = ["ScrapingAnt key 1", "ScrapingAnt key 2"];
+const SCRAPINGANT_TOGGLES = [
+  { id: "pageLists", label: "ScrapingAnt page lists" },
+  { id: "images", label: "ScrapingAnt images" }
+];
 const SCRAPINGANT_TIMEOUT_SECONDS = 20;
 const SCRAPINGANT_ORIGINAL_HEADER_PREFIX = "ant-original-header-";
 const SCRAPINGANT_FORWARDED_HEADERS = ["Accept", "Referer", "Origin", "User-Agent"];
@@ -39,13 +43,18 @@ function mangaHubRequestContext(request) {
   const url = proxied ? scrapingAntParameter(request.url, "url") : request?.url ?? "";
   const query = requestJson(request?.data)?.query;
   const pageList = url === MH_API_DOMAIN && typeof query === "string" && /\bchapter\s*\(/.test(query);
+  const image = url.startsWith(`${MH_CDN_DOMAIN}/`);
   const stage = pageList ? "Chapter page list"
     : url.startsWith(MH_API_DOMAIN) ? "MangaHub API"
-    : url.startsWith(`${MH_CDN_DOMAIN}/`) ? "Chapter image"
+    : image ? "Chapter image"
     : url.startsWith(`${MH_DOMAIN}${CHAPTER_CRYPTO_PATH}`) ? "Decryption key"
     : url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`) ? "Access-token refresh"
     : "MangaHub website";
-  return { proxied, pageList, stage, endpoint: url.split(/[?#]/)[0] };
+  return { proxied, pageList, image, stage, endpoint: url.split(/[?#]/)[0] };
+}
+
+function scrapingAntEnabled(config, context) {
+  return (context.pageList && config.pageLists) || (context.image && config.images);
 }
 
 function scrapingAntHeader(headers, name) {
@@ -143,7 +152,9 @@ class ScrapingAnt {
   async getConfig() {
     const stored = await this.stateManager.retrieve(SCRAPINGANT_CONFIG_STATE);
     return {
-      enabled: stored?.enabled === true,
+      ...Object.fromEntries(SCRAPINGANT_TOGGLES.map(({ id }) => [
+        id, typeof stored?.[id] === "boolean" ? stored[id] : stored?.enabled === true
+      ])),
       slots: SCRAPINGANT_KEY_LABELS.map((_, index) => ({
         disabled: stored?.slots?.[index]?.disabled === true,
         retryAt: Number.isFinite(stored?.slots?.[index]?.retryAt) ? stored.slots[index].retryAt : 0,
@@ -157,10 +168,10 @@ class ScrapingAnt {
     return SCRAPINGANT_KEY_LABELS.map((_, index) => Array.isArray(stored) && typeof stored[index] === "string" ? stored[index].trim() : "");
   }
 
-  setEnabled(enabled) {
+  setEnabled(id, enabled) {
     return this.enqueue(async () => {
       const config = await this.getConfig();
-      config.enabled = enabled === true;
+      config[id] = enabled === true;
       await this.stateManager.store(SCRAPINGANT_CONFIG_STATE, config);
     });
   }
@@ -186,19 +197,19 @@ class ScrapingAnt {
 
   async prepareRequest(request, userAgent) {
     this.recoverRequest();
-    if (!(await this.getConfig()).enabled) return null;
+    if (!scrapingAntEnabled(await this.getConfig(), mangaHubRequestContext(request))) return null;
     return this.queueRequest(() => this.buildRequest(request, userAgent));
   }
 
   async buildRequest(request, userAgent) {
     const config = await this.getConfig();
-    if (!config.enabled) return null;
+    const context = mangaHubRequestContext(request);
+    if (!scrapingAntEnabled(config, context)) return null;
     const keys = await this.getKeys();
     if (!keys.some(Boolean)) throw new Error("Add a ScrapingAnt key in MangaHub's source settings, or disable ScrapingAnt.");
     const candidates = keys.map((_, index) => index)
       .filter((index) => keys[index] && keys.indexOf(keys[index]) === index);
     const available = candidates.filter((index) => !config.slots[index].disabled && config.slots[index].retryAt <= Date.now());
-    const context = mangaHubRequestContext(request);
     if (available.length) {
       const free = available.filter((index) => !this.activeRequests.has(keys[index]));
       if (!free.length || this.activeRequests.size >= candidates.length) return this.waitForRequest();
@@ -311,17 +322,17 @@ function createScrapingAntMenu(client, onChange) {
     id: "scrapingant",
     isHidden: false,
     rows: async () => [
-      App.createDUISwitch({
-        id: SCRAPINGANT_CONFIG_STATE,
-        label: "ScrapingAnt page lists and images",
+      ...SCRAPINGANT_TOGGLES.map(({ id, label }) => App.createDUISwitch({
+        id: `${SCRAPINGANT_CONFIG_STATE}_${id}`,
+        label,
         value: App.createDUIBinding({
-          get: async () => (await client.getConfig()).enabled,
+          get: async () => (await client.getConfig())[id],
           set: async (value) => {
-            await client.setEnabled(value);
+            await client.setEnabled(id, value);
             onChange();
           }
         })
-      }),
+      })),
       ...SCRAPINGANT_KEY_LABELS.map((label, index) => App.createDUISecureInputField({
         id: `${SCRAPINGANT_KEYS_STATE}_${index}`,
         label,

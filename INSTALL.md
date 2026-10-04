@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.12, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.13, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,22 +17,22 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.12 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.12 from this repository.
+Install MangaHub 3.1.13 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.13 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
 ## Optional ScrapingAnt page lists and images
 
-ScrapingAnt is disabled by default. To try it:
+ScrapingAnt has independent page-list and image toggles, both disabled by default on a fresh installation. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.12
+1. Open MangaHub's source settings in Paperback after updating to 3.1.13
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
-3. Enable `ScrapingAnt page lists and images`
+3. Enable `ScrapingAnt page lists`, `ScrapingAnt images`, or both
 4. Open a chapter or retry a failed download
 
-The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling the switch returns page-list and image requests to the direct connection without deleting the keys. The existing switch and saved keys carry over from earlier versions.
+The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling a toggle sends that request type directly without deleting the keys or changing the other toggle. Both toggles initially inherit the old combined switch on upgrade, then save independently. Saved keys and provider cooldowns carry over. Changing either toggle clears the chapter-page-list cache; already-running requests and Paperback's image cache are not canceled or cleared.
 
-Chapter page-list GraphQL requests and chapter images from `imgx.mghcdn.com` go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
+With `ScrapingAnt page lists` enabled, chapter-page-list GraphQL requests go through ScrapingAnt. With `ScrapingAnt images` enabled, chapter images from `imgx.mghcdn.com` go through ScrapingAnt. Either type goes directly when its toggle is off. Both proxy routes use `browser=false` and standard datacenter proxies, sharing the saved keys, cooldowns, and one-request-per-key concurrency slots. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
 
 - With one key entered in either field, uses only that key for every proxied request; empty fields and duplicate keys are ignored
 - Prefers a free usable key; alternates when both distinct keys are free, and waits when all usable keys are busy
@@ -50,7 +50,7 @@ After credits renew, use `Reset ScrapingAnt key availability` to let unavailable
 
 A request with no response callback can hold the slot for up to 60 seconds before it is eligible for recovery. The watchdog releases it automatically where JavaScript timers are available. Otherwise, retry a page or reopen the source settings after 60 seconds to recover the expired slot. Late responses cannot release a newer request's slot. This recovery assumes native requests have stopped by then; the queue cannot cancel native transfers or coordinate other source instances, devices, or applications using the same ScrapingAnt account.
 
-This is experimental and may add latency. It does not remove MangaHub's API rate limits or access-token requirements, or guarantee that ScrapingAnt can retrieve the image CDN's binary responses. Disable the switch if proxying does not help. In-app image downloads and live requests with user keys have not been verified during implementation.
+This is experimental and may add latency. It does not remove MangaHub's API rate limits or access-token requirements, or guarantee that ScrapingAnt can retrieve the image CDN's binary responses. Disable either toggle if proxying that request type does not help. In-app image downloads and live requests with user keys have not been verified during implementation.
 
 Provider references: [request format](https://docs.scrapingant.com/request-response-format), [POST requests](https://docs.scrapingant.com/post-put-delete), [forwarded headers](https://docs.scrapingant.com/custom-headers), [errors and free-plan concurrency](https://docs.scrapingant.com/errors), [browser rendering](https://docs.scrapingant.com/headless-browser).
 
@@ -105,7 +105,7 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Keeps the existing page-list cache and one-request-per-second scheduling
 - ScrapingAnt provider key cooldowns remain separate and unchanged
 
-Opening a chapter fetches its page list and images through ScrapingAnt when enabled, but access-token and decryption-key requests remain direct. The diagnostic identifies where a failure occurs; it cannot determine whether MangaHub's limit is per IP, token, or account unless the server supplies that information. The extension does not add a MangaHub cooldown or remove server-side limits.
+Opening a chapter routes its page list and images according to their separate ScrapingAnt toggles, while access-token and decryption-key requests remain direct. The diagnostic identifies where a failure occurs; it cannot determine whether MangaHub's limit is per IP, token, or account unless the server supplies that information. The extension does not add a MangaHub cooldown or remove server-side limits.
 
 Search and browse retain Netsky's original queries and parsing, using the shared rate-limited request manager. Cloudflare restrictions, site outages, and server rate limits can still prevent requests. In-app compatibility, live chapter loading, and performance gains have not been verified here.
 
