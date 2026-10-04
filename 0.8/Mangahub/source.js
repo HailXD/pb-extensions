@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.25","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.26","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2489,6 +2489,8 @@ const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
 const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
 const CDN_PAGE_PROBE_BATCH_SIZE = 8;
+const CDN_PROBE_TIMEOUT_MS = 5_000;
+const CDN_PROBE_RANGE = "bytes=0-0";
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -2518,6 +2520,22 @@ class Mangahub extends UPSTREAM.Mangahub {
           await this.handleRateLimit(response);
           return response;
         }
+      }
+    });
+    this.cdnRequestManager = App.createRequestManager({
+      requestsPerSecond: REQUESTS_PER_SECOND,
+      requestTimeout: CDN_PROBE_TIMEOUT_MS,
+      interceptor: {
+        interceptRequest: async (request) => {
+          request.headers = {
+            ...request.headers ?? {},
+            Referer: `${MH_DOMAIN}/`,
+            Origin: MH_DOMAIN,
+            "User-Agent": await this.requestManager.getDefaultUserAgent()
+          };
+          return request;
+        },
+        interceptResponse: async (response) => response
       }
     });
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
@@ -2683,24 +2701,32 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async checkPage(slug, number, page, ext) {
     try {
-      const response = await this.requestManager.schedule(App.createRequest({
+      const response = await this.cdnRequestManager.schedule(App.createRequest({
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
-        method: "HEAD"
+        method: "GET",
+        headers: { Range: CDN_PROBE_RANGE }
       }), 1);
       this.lastCheckStatus += ` ${ext}:${response.status}`;
-      return response.status < 400;
+      if (response.status === 404 || response.status === 410) return false;
+      const contentType = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === "content-type")?.[1];
+      if ((response.status === 200 || response.status === 206) && (!contentType || /^image\//i.test(String(contentType)))) return true;
+      return null;
     } catch (err) {
       this.lastCheckError += ` ${ext}:${err?.message || err}`;
-      return false;
+      return null;
     }
   }
 
   async resolveExt(slug, number, page, failedExt = null) {
     const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
     const checks = candidates.map((candidate) => this.checkPage(slug, number, page, candidate));
+    let inconclusive = false;
     for (const [index, candidate] of candidates.entries()) {
-      if (await checks[index]) return candidate;
+      const result = await checks[index];
+      if (result === true) return candidate;
+      if (result === null) inconclusive = true;
     }
+    if (inconclusive) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
     return null;
   }
 
@@ -2724,7 +2750,8 @@ class Mangahub extends UPSTREAM.Mangahub {
       );
       for (let offset = 0; offset < checks.length; offset++) {
         const page = firstPage + offset;
-        const ext = await checks[offset] ? batchExt : await this.resolveExt(slug, number, page, batchExt);
+        const exists = await checks[offset];
+        const ext = exists === true ? batchExt : await this.resolveExt(slug, number, page, exists === false ? batchExt : null);
         if (!ext) return pages;
         currentExt = ext;
         pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
