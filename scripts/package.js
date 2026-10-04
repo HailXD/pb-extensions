@@ -3,7 +3,7 @@ const MANIFEST_PATH = "0.8/versioning.json";
 const SOURCE_INFO_PATH = "src/source-info.json";
 const UPSTREAM_PATH = "vendor/mangahub-3.1.0.js";
 const CRYPTO_FILES = ["sjcl", "aes", "bitArray", "codecString", "codecBase64", "gcm"];
-const PATCH_FILES = ["src/chapter-crypto.js", "src/scrapingant.js", "src/mangahub.js"];
+const PATCH_FILES = ["src/chapter-crypto.js", "src/mangahub.js"];
 const LICENSE_FILES = [
   ["LICENSE", "0.8/Mangahub/includes/LICENSE"],
   ["THIRD_PARTY.md", "0.8/Mangahub/includes/THIRD_PARTY.md"],

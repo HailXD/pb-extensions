@@ -10,6 +10,14 @@ const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests
 
 class MangaHubRateLimitError extends Error {}
 
+function parseJson(data) {
+  try {
+    return typeof data === "string" ? JSON.parse(data) : data;
+  } catch {
+    return null;
+  }
+}
+
 class Mangahub extends UPSTREAM.Mangahub {
   constructor() {
     super();
@@ -22,11 +30,8 @@ class Mangahub extends UPSTREAM.Mangahub {
       interceptor: {
         interceptRequest: (request) => this.prepareMangaHubRequest(request),
         interceptResponse: async (response) => {
-          const targetResponse = response.request?.url?.startsWith(`${SCRAPINGANT_ENDPOINT}?`)
-            ? await this.scrapingAnt.handleResponse(response)
-            : response;
-          if (!mangaHubRequestContext(targetResponse.request).pageList) await this.handleRateLimit(targetResponse);
-          return targetResponse;
+          await this.handleRateLimit(response);
+          return response;
         }
       }
     });
@@ -34,8 +39,6 @@ class Mangahub extends UPSTREAM.Mangahub {
       requestsPerSecond: CDN_REQUESTS_PER_SECOND,
       requestTimeout: REQUEST_TIMEOUT_MS
     });
-    this.chapterCrypto = new ChapterCrypto(this.requestManager);
-    this.scrapingAnt = new ScrapingAnt(this.stateManager, REQUEST_TIMEOUT_MS);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
@@ -44,17 +47,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     });
   }
 
-  async getSourceMenu() {
-    this.scrapingAnt.recoverRequest();
-    return createScrapingAntMenu(this.scrapingAnt, () => this.chapterPagesCache.clear());
-  }
-
   async prepareMangaHubRequest(request) {
-    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return this.scrapingAnt.prepareProxyRequest(request);
-    if (request.url.startsWith(`${MH_CDN_DOMAIN}/`)) {
-      const proxyRequest = await this.scrapingAnt.prepareRequest(request, await this.requestManager.getDefaultUserAgent());
-      if (proxyRequest) return proxyRequest;
-    }
     const [userAgent, access] = await Promise.all([
       this.requestManager.getDefaultUserAgent(),
       this.getMhubAccess()
@@ -66,22 +59,16 @@ class Mangahub extends UPSTREAM.Mangahub {
       "User-Agent": userAgent,
       "x-mhub-access": access
     };
-    const context = mangaHubRequestContext(request);
-    if (context.pageList || context.accessRefresh) {
-      const proxyRequest = await this.scrapingAnt.prepareRequest(request, userAgent);
-      if (proxyRequest) return proxyRequest;
-    }
     return request;
   }
 
   async handleRateLimit(response) {
-    const result = requestJson(response.data);
+    const result = parseJson(response.data);
     const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
       RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
     )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
     if (response.status !== 429 && !limited) return;
-    const error = await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
-    throw new MangaHubRateLimitError(error.message);
+    throw new MangaHubRateLimitError("MangaHub rate limit reached");
   }
 
   shareRequest(key, load) {
@@ -112,7 +99,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapters unavailable");
       if (result.errors?.length) {
-        throw await this.scrapingAnt.requestError(response, "MangaHub", "Chapters unavailable");
+        throw new Error("Chapters unavailable");
       }
       const chapters = result.data?.manga?.chapters;
       if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
