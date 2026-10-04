@@ -60,7 +60,8 @@ class Mangahub extends UPSTREAM.Mangahub {
       "User-Agent": userAgent,
       "x-mhub-access": access
     };
-    if (mangaHubRequestContext(request).pageList) {
+    const context = mangaHubRequestContext(request);
+    if (context.pageList || context.accessRefresh) {
       const proxyRequest = await this.scrapingAnt.prepareRequest(request, userAgent);
       if (proxyRequest) return proxyRequest;
     }
@@ -193,8 +194,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async loadChapterPages(mangaId, number) {
-    if (this.pendingAccessKey) await this.pendingAccessKey;
-    if (!await this.getMhubAccess()) await this.refreshAPIKey();
+    await this.refreshAPIKey();
     let refreshedAfterRateLimit = false;
     for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
       const response = await this.requestChapterPages(mangaId, number).catch(async (error) => {

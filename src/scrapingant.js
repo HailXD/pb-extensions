@@ -44,17 +44,18 @@ function mangaHubRequestContext(request) {
   const query = requestJson(request?.data)?.query;
   const pageList = url === MH_API_DOMAIN && typeof query === "string" && /\bchapter\s*\(/.test(query);
   const image = url.startsWith(`${MH_CDN_DOMAIN}/`);
+  const accessRefresh = url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`);
   const stage = pageList ? "Chapter page list"
     : url.startsWith(MH_API_DOMAIN) ? "MangaHub API"
     : image ? "Chapter image"
     : url.startsWith(`${MH_DOMAIN}${CHAPTER_CRYPTO_PATH}`) ? "Decryption key"
-    : url.startsWith(`${MH_DOMAIN}${ACCESS_KEY_REFRESH_PATH}`) ? "Access-token refresh"
+    : accessRefresh ? "Access-token refresh"
     : "MangaHub website";
-  return { proxied, pageList, image, stage, endpoint: url.split(/[?#]/)[0] };
+  return { proxied, pageList, image, accessRefresh, stage, endpoint: url.split(/[?#]/)[0] };
 }
 
 function scrapingAntEnabled(config, context) {
-  return (context.pageList && config.pageLists) || (context.image && config.images);
+  return (context.pageList && config.pageLists) || (context.image && config.images) || (context.accessRefresh && config.pageLists);
 }
 
 function scrapingAntHeader(headers, name) {
