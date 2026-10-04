@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.13, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.31, based on Netsky's 3.1.0 source, with direct CDN chapter page probing.
 
 ## Publish on GitHub Pages
 
@@ -32,7 +32,7 @@ ScrapingAnt has independent page-list and image toggles, both disabled by defaul
 
 The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling a toggle sends that request type directly without deleting the keys or changing the other toggle. Both toggles initially inherit the old combined switch on upgrade, then save independently. Saved keys and provider cooldowns carry over. Changing either toggle clears the chapter-page-list cache; already-running requests and Paperback's image cache are not canceled or cleared.
 
-With `ScrapingAnt page lists` enabled, chapter-page-list GraphQL requests go through ScrapingAnt. With `ScrapingAnt images` enabled, chapter images from `imgx.mghcdn.com` go through ScrapingAnt. Either type goes directly when its toggle is off. Both proxy routes use `browser=false` and standard datacenter proxies, sharing the saved keys, cooldowns, and one-request-per-key concurrency slots. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
+With `ScrapingAnt page lists` enabled, chapter-page-list GraphQL requests go through ScrapingAnt. With `ScrapingAnt images` enabled, chapter images from `imgx.mghcdn.com` go through ScrapingAnt. Either type goes directly when its toggle is off. Both proxy routes use `browser=false` and standard datacenter proxies, sharing the saved keys, cooldowns, and one-request-per-key concurrency slots. Cover images, search, manga details, chapter-list updates, and access-token refresh stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
 
 - With one key entered in either field, uses only that key for every proxied request; empty fields and duplicate keys are ignored
 - Prefers a free usable key; alternates when both distinct keys are free, and waits when all usable keys are busy
@@ -56,35 +56,33 @@ Provider references: [request format](https://docs.scrapingant.com/request-respo
 
 ## Maintain the extension
 
-Edit `src/chapter-crypto.js`, `src/scrapingant.js`, `src/mangahub.js`, or `src/source-info.json`, then run:
+Edit `src/mangahub.js` or `src/source-info.json`, then run:
 
 ```sh
 bun run package
 ```
 
-Packaging concatenates the unmodified upstream bundle, the vendored SJCL modules, and the compatibility patch. It updates `0.8/Mangahub/source.js`, `0.8/versioning.json`, and the distributed license files. It does not compile TypeScript, install dependencies, or execute tests. The manifest retains the upstream bundle's 0.8.7 SDK/toolchain metadata.
+Packaging concatenates the unmodified upstream bundle and the compatibility patch. It updates `0.8/Mangahub/source.js`, `0.8/versioning.json`, and the distributed license files. It does not compile TypeScript, install dependencies, or execute tests. The manifest retains the upstream bundle's 0.8.7 SDK/toolchain metadata.
 
 Commit the updated `0.8/` files to publish changes. The Pages workflow deploys those files without rebuilding them. The supplied reference folders and ZIP archives are not required for packaging or deployment.
 
-## Decryption behavior
+## Chapter page loading
 
-- Supports both the old plaintext page JSON and the `enc:v1:keyId:iv:authTag:ciphertext` format
-- Requests the rotating AES-256 key directly from MangaHub's `/api/chapter-crypto` endpoint
-- Authenticates and decrypts AES-GCM using bundled JavaScript, without `Application`, WebCrypto, Node APIs, or external decryption services at runtime
-- Caches keys and initialized AES ciphers in memory, refreshes before expiry, and shares concurrent key requests
-- Fetches a key on key-ID mismatch and retries the chapter request once if rotation leaves it out of sync, without fetching the same mismatched key twice
-- Rejects malformed page data and authentication failures rather than returning an empty chapter
-- Normalizes old stored access cookies into API tokens and retries recognized access-key errors once
-- Allows one access-token refresh and extra page-list request per chapter load after a MangaHub rate-limit response, separately from access-key and encryption-key retries
+- Discovers image URLs using direct CDN `HEAD` requests rather than GraphQL chapter page lists
+- Supports mixed image suffixes within a chapter
+- Probes `.jpg`, `.jpeg`, `.png`, `.webp`, `a.jpg`, `b.jpg`, `c.jpg`, and `d.jpg`
+- Treats network failures and blocked responses as inconclusive rather than silently returning a shortened chapter
+- Does not fetch chapter encryption keys or decrypt page lists
+- Retains access-key handling for manga metadata and chapter-list API requests
 
 ## Request optimizations
 
 - Shares simultaneous requests for the same manga details, chapter list, or chapter pages; failed requests are not cached
-- Keeps up to 16 chapter page lists in memory for 60 seconds, avoiding another API request and decryption when reopening a recent chapter
+- Keeps up to 16 chapter page lists in memory for 60 seconds, avoiding another CDN scan when reopening a recent chapter
 - Returns separate page arrays so callers cannot modify the cached page list
 - Requests only chapter numbers, titles, and dates when refreshing a chapter list, omitting unused manga titles and chapter slugs
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
-- Limits scheduled requests to one per second to reduce bursts
+- Limits API requests to 10 per second and CDN probes to 60 per second, with a rolling eight-page probe window
 - Separately serializes ScrapingAnt page lists and images per distinct key, allowing up to two concurrent requests with two usable keys; this is an in-flight limit, not just request spacing
 
 ## Rate-limit errors
@@ -94,7 +92,7 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Starts the error message with `[ScrapingAnt key 1]`, `[ScrapingAnt key 2]`, or `[Direct (local)]`, followed by the service and server reason, so the route is visible in a short toast; uses `ScrapingAnt` without a key number if the key cannot be identified, or `Unknown route` if Paperback supplies no request URL
 - Includes the request stage, endpoint without query parameters, and HTTP status in the remaining error details
 - Includes the server's message and GraphQL error code when supplied, plus `Retry-After` when available; this header is informational for MangaHub errors and does not impose a local cooldown
-- Labels page-list, image, other API, decryption-key, access-token-refresh, and website requests separately
+- Labels page-list, image, other API, access-token-refresh, and website requests separately
 - Explains known provider statuses and identifies saved provider key availability blocks as local, with no HTTP request sent
 - Redacts known keys and request credentials from server error details; diagnostics appear in the popup, not a log file
 - Does not impose a local MangaHub cooldown or block manual retries; ignores cooldown state saved by older versions
@@ -102,10 +100,10 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Shares overlapping access-token refreshes; a repeated rate limit or failed refresh is surfaced instead of starting a refresh loop
 - Does not refresh the MangaHub token for ScrapingAnt provider limits, local key-availability blocks, images, or other request stages
 - MangaHub may return the same token or enforce an IP/account limit, so refreshing does not guarantee recovery
-- Keeps the existing page-list cache and one-request-per-second scheduling
+- Keeps the existing page-list cache and separate API and CDN scheduling
 - ScrapingAnt provider key cooldowns remain separate and unchanged
 
-Opening a chapter routes its page list and images according to their separate ScrapingAnt toggles, while access-token and decryption-key requests remain direct. The diagnostic identifies where a failure occurs; it cannot determine whether MangaHub's limit is per IP, token, or account unless the server supplies that information. The extension does not add a MangaHub cooldown or remove server-side limits.
+Opening a chapter discovers its page list through direct CDN probing, and Paperback handles the image downloads separately. The diagnostic identifies where a failure occurs; it cannot determine whether MangaHub's limit is per IP, token, or account unless the server supplies that information. The extension does not add a MangaHub cooldown or remove server-side limits.
 
 Search and browse retain Netsky's original queries and parsing, using the shared rate-limited request manager. Cloudflare restrictions, site outages, and server rate limits can still prevent requests. In-app compatibility, live chapter loading, and performance gains have not been verified here.
 

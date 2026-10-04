@@ -1,4 +1,10 @@
 const UPSTREAM = ROOT.Sources;
+const MH_DOMAIN = "https://mangahub.io";
+const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
+const MH_CDN_DOMAIN = "https://imgx.mghcdn.com";
+const ACCESS_KEY_STATE = "mhub_key";
+const ACCESS_COOKIE_NAME = "mhub_access";
+const ACCESS_KEY_REFRESH_PATH = "/chapter/the-last-human/chapter-1?reloadKey=1";
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
@@ -17,6 +23,20 @@ function parseJson(data) {
     return typeof data === "string" ? JSON.parse(data) : data;
   } catch {
     return null;
+  }
+}
+
+function parseResponse(response, label) {
+  if (response.status === 403 || response.status === 503) {
+    throw new Error(`${label}: MangaHub is unavailable or requires Cloudflare verification. Open the source's Cloudflare bypass and try again.`);
+  }
+  if (response.status >= 400) {
+    throw new Error(`${label}: MangaHub returned HTTP ${response.status}`);
+  }
+  try {
+    return JSON.parse(response.data);
+  } catch {
+    throw new Error(`${label}: MangaHub returned an invalid response. Try the source's Cloudflare bypass.`);
   }
 }
 
