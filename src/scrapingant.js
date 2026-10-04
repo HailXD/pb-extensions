@@ -170,7 +170,7 @@ class ScrapingAnt {
     const index = requestKey ? keys.indexOf(requestKey) : -1;
     const result = requestJson(response.data);
     const messages = Array.isArray(result?.errors)
-      ? result.errors.map((error) => [error?.message, error?.extensions?.code].filter((value) => typeof value === "string").join(" / ")).filter(Boolean).join("; ")
+      ? result.errors.map((error) => typeof error === "string" ? error : [error?.message, error?.extensions?.code].filter((value) => typeof value === "string").join(" / ")).filter(Boolean).join("; ")
       : "";
     const plainText = typeof response.data === "string" && !result && !/<[a-z!]/i.test(response.data) ? response.data.trim() : "";
     const detail = messages || [result?.message, result?.error, result?.detail].find((value) => typeof value === "string" && value) || plainText || fallback;
@@ -181,13 +181,12 @@ class ScrapingAnt {
       .replace(/https?:\/\/[^\s"<>]+/gi, (url) => url.split(/[?#]/)[0])
       .replace(/[\r\n]+/g, " ").slice(0, REQUEST_ERROR_DETAIL_LIMIT);
     const retryAfter = scrapingAntHeader(response.headers, context.proxied && service === "MangaHub" ? `${SCRAPINGANT_ORIGINAL_HEADER_PREFIX}retry-after` : "retry-after");
+    const route = context.proxied ? `ScrapingAnt${index >= 0 ? ` key ${index + 1}` : ""}` : response.request?.url ? "Direct (local)" : "Unknown route";
     const lines = [
-      `${service} request failed`,
+      `[${route}] ${service}: ${redact(detail)}`,
       `Request: ${context.stage}`,
-      `Route: ${context.proxied ? `ScrapingAnt${index >= 0 ? ` key ${index + 1}` : ""}` : "Direct"}`,
       `Endpoint: ${response.request?.method ?? "GET"} ${context.endpoint}`,
       `HTTP: ${response.status}`,
-      `Reason: ${redact(detail)}`,
       ...(retryAfter ? [`Retry-After: ${redact(retryAfter)}`] : [])
     ];
     return new Error(lines.join("\n"));

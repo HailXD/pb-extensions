@@ -67,7 +67,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   async handleRateLimit(response) {
     const result = requestJson(response.data);
     const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
-      RATE_LIMIT_ERROR.test(error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
+      RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
     )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
     if (response.status !== 429 && !limited) return;
     throw await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
@@ -98,9 +98,10 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
+      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapters unavailable");
       if (result.errors?.length) {
-        throw new Error(`MangaHub: ${result.errors.map((error) => error.message || "Unknown API error").join(" ")}`);
+        throw await this.scrapingAnt.requestError(response, "MangaHub", "Chapters unavailable");
       }
       const chapters = result.data?.manga?.chapters;
       if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
@@ -186,14 +187,15 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
+      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapter unavailable");
-      const errors = result.errors?.map((error) => error.message || "Unknown API error").join(" ");
+      const errors = result.errors?.map((error) => typeof error === "string" ? error : error.message || "Unknown API error").join(" ");
       if (errors) {
         if (attempt + 1 < MAX_CHAPTER_ATTEMPTS && RETRYABLE_API_ERROR.test(errors)) {
           await this.refreshAPIKey();
           continue;
         }
-        throw new Error(`MangaHub: ${errors}`);
+        throw await this.scrapingAnt.requestError(response, "MangaHub", errors);
       }
       try {
         return await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);

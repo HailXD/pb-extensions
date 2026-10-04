@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.8, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.9, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.8 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.8 from this repository.
+Install MangaHub 3.1.9 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.9 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -25,7 +25,7 @@ If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.8
+1. Open MangaHub's source settings in Paperback after updating to 3.1.9
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
 3. Enable `ScrapingAnt page lists and images`
 4. Open a chapter or retry a failed download
@@ -82,8 +82,10 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 
 ## Rate-limit errors
 
-- Detects HTTP 429 and rate-limit messages or codes in GraphQL errors across the shared request manager
-- Shows the service returning the error, request stage, direct or ScrapingAnt route, key slot when identifiable, endpoint without query parameters, and HTTP status
+- Detects HTTP 429 and rate-limit messages or codes in GraphQL errors across the shared request manager, with an additional check in chapter-list and chapter-page loading before access-key retries
+- Formats chapter-list and chapter-page GraphQL errors with route details even when they reach the loader instead of being rejected by the interceptor
+- Starts the error message with `[ScrapingAnt key 1]`, `[ScrapingAnt key 2]`, or `[Direct (local)]`, followed by the service and server reason, so the route is visible in a short toast; uses `ScrapingAnt` without a key number if the key cannot be identified, or `Unknown route` if Paperback supplies no request URL
+- Includes the request stage, endpoint without query parameters, and HTTP status in the remaining error details
 - Includes the server's message and GraphQL error code when supplied, plus `Retry-After` when available; this header is informational for MangaHub errors and does not impose a local cooldown
 - Labels page-list, image, other API, decryption-key, access-token-refresh, and website requests separately
 - Explains known provider statuses and identifies saved provider key availability blocks as local, with no HTTP request sent

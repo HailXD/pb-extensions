@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.8","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.9","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2654,7 +2654,7 @@ class ScrapingAnt {
     const index = requestKey ? keys.indexOf(requestKey) : -1;
     const result = requestJson(response.data);
     const messages = Array.isArray(result?.errors)
-      ? result.errors.map((error) => [error?.message, error?.extensions?.code].filter((value) => typeof value === "string").join(" / ")).filter(Boolean).join("; ")
+      ? result.errors.map((error) => typeof error === "string" ? error : [error?.message, error?.extensions?.code].filter((value) => typeof value === "string").join(" / ")).filter(Boolean).join("; ")
       : "";
     const plainText = typeof response.data === "string" && !result && !/<[a-z!]/i.test(response.data) ? response.data.trim() : "";
     const detail = messages || [result?.message, result?.error, result?.detail].find((value) => typeof value === "string" && value) || plainText || fallback;
@@ -2665,13 +2665,12 @@ class ScrapingAnt {
       .replace(/https?:\/\/[^\s"<>]+/gi, (url) => url.split(/[?#]/)[0])
       .replace(/[\r\n]+/g, " ").slice(0, REQUEST_ERROR_DETAIL_LIMIT);
     const retryAfter = scrapingAntHeader(response.headers, context.proxied && service === "MangaHub" ? `${SCRAPINGANT_ORIGINAL_HEADER_PREFIX}retry-after` : "retry-after");
+    const route = context.proxied ? `ScrapingAnt${index >= 0 ? ` key ${index + 1}` : ""}` : response.request?.url ? "Direct (local)" : "Unknown route";
     const lines = [
-      `${service} request failed`,
+      `[${route}] ${service}: ${redact(detail)}`,
       `Request: ${context.stage}`,
-      `Route: ${context.proxied ? `ScrapingAnt${index >= 0 ? ` key ${index + 1}` : ""}` : "Direct"}`,
       `Endpoint: ${response.request?.method ?? "GET"} ${context.endpoint}`,
       `HTTP: ${response.status}`,
-      `Reason: ${redact(detail)}`,
       ...(retryAfter ? [`Retry-After: ${redact(retryAfter)}`] : [])
     ];
     return new Error(lines.join("\n"));
@@ -2818,7 +2817,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   async handleRateLimit(response) {
     const result = requestJson(response.data);
     const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
-      RATE_LIMIT_ERROR.test(error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
+      RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
     )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
     if (response.status !== 429 && !limited) return;
     throw await this.scrapingAnt.requestError(response, "MangaHub", "The server rejected the request as rate-limited but did not specify whether the limit is per IP, access token, or account");
@@ -2849,9 +2848,10 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
+      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapters unavailable");
       if (result.errors?.length) {
-        throw new Error(`MangaHub: ${result.errors.map((error) => error.message || "Unknown API error").join(" ")}`);
+        throw await this.scrapingAnt.requestError(response, "MangaHub", "Chapters unavailable");
       }
       const chapters = result.data?.manga?.chapters;
       if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
@@ -2937,14 +2937,15 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
+      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapter unavailable");
-      const errors = result.errors?.map((error) => error.message || "Unknown API error").join(" ");
+      const errors = result.errors?.map((error) => typeof error === "string" ? error : error.message || "Unknown API error").join(" ");
       if (errors) {
         if (attempt + 1 < MAX_CHAPTER_ATTEMPTS && RETRYABLE_API_ERROR.test(errors)) {
           await this.refreshAPIKey();
           continue;
         }
-        throw new Error(`MangaHub: ${errors}`);
+        throw await this.scrapingAnt.requestError(response, "MangaHub", errors);
       }
       try {
         return await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);
