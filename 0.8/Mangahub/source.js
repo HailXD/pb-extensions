@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.11","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.12","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2552,61 +2552,69 @@ class ScrapingAnt {
     this.stateManager = stateManager;
     this.requestTimeout = requestTimeout;
     this.pending = Promise.resolve();
-    this.networkPending = Promise.resolve();
-    this.activeRequest = null;
+    this.activeRequests = new Map();
     this.nextRequestId = 0;
     this.nextKey = 0;
   }
 
   releaseRequest(id) {
-    const slot = this.activeRequest;
-    if (!slot || slot.id !== id) return;
-    this.activeRequest = null;
+    const slot = [...this.activeRequests.values()].find((slot) => slot.id === id);
+    if (!slot) return;
+    this.activeRequests.delete(slot.key);
     if (slot.timer !== null && typeof clearTimeout === "function") clearTimeout(slot.timer);
     slot.release();
   }
 
   recoverRequest() {
-    if (this.activeRequest && this.activeRequest.expiresAt <= Date.now()) {
-      this.releaseRequest(this.activeRequest.id);
+    for (const slot of this.activeRequests.values()) {
+      if (slot.expiresAt <= Date.now()) this.releaseRequest(slot.id);
     }
   }
 
+  waitForRequest() {
+    return { wait: Promise.race([...this.activeRequests.values()].map((slot) => slot.done)) };
+  }
+
   async queueRequest(load) {
-    this.recoverRequest();
-    const previous = this.networkPending;
-    const slot = { id: String(++this.nextRequestId), release: null, timer: null, expiresAt: 0 };
-    this.networkPending = new Promise((resolve) => { slot.release = resolve; });
     const queuedAt = Date.now();
-    await previous;
-    if (Date.now() - queuedAt >= this.requestTimeout) {
-      slot.release();
-      throw new Error("[ScrapingAnt] Local single-request queue wait timed out. No HTTP request sent; retry the page.");
-    }
-    this.activeRequest = slot;
-    slot.expiresAt = Date.now() + SCRAPINGANT_SLOT_TIMEOUT_MS;
-    try {
-      if (typeof setTimeout === "function") {
-        slot.timer = setTimeout(() => this.releaseRequest(slot.id), SCRAPINGANT_SLOT_TIMEOUT_MS);
-      }
-      const request = await load();
-      if (this.activeRequest !== slot) throw new Error("[ScrapingAnt] Local request slot expired before sending. Retry the page.");
-      if (request) {
-        request.headers = { ...request.headers, [SCRAPINGANT_REQUEST_ID_HEADER]: slot.id };
-      } else {
-        this.releaseRequest(slot.id);
-      }
-      return request;
-    } catch (error) {
-      this.releaseRequest(slot.id);
-      throw error;
+    while (true) {
+      this.recoverRequest();
+      const result = await this.enqueue(async () => {
+        if (Date.now() - queuedAt >= this.requestTimeout) {
+          throw new Error("[ScrapingAnt] Local per-key queue wait timed out. No HTTP request sent; retry the page.");
+        }
+        const request = await load();
+        if (!request) return { request: null };
+        if (request.wait) return request;
+        const key = scrapingAntParameter(request.url, "x-api-key");
+        if (!key) throw new Error("[ScrapingAnt] Proxy request has no API key. No HTTP request sent.");
+        const active = this.activeRequests.get(key);
+        if (active) return { wait: active.done };
+        if (this.activeRequests.size >= SCRAPINGANT_KEY_LABELS.length) return this.waitForRequest();
+        const slot = { key, id: String(++this.nextRequestId), release: null, done: null, timer: null, expiresAt: Date.now() + SCRAPINGANT_SLOT_TIMEOUT_MS };
+        slot.done = new Promise((resolve) => { slot.release = resolve; });
+        this.activeRequests.set(key, slot);
+        try {
+          if (typeof setTimeout === "function") {
+            slot.timer = setTimeout(() => this.releaseRequest(slot.id), SCRAPINGANT_SLOT_TIMEOUT_MS);
+          }
+          request.headers = { ...request.headers, [SCRAPINGANT_REQUEST_ID_HEADER]: slot.id };
+          return { request };
+        } catch (error) {
+          this.releaseRequest(slot.id);
+          throw error;
+        }
+      });
+      if (!result.wait) return result.request;
+      await result.wait;
     }
   }
 
   prepareProxyRequest(request) {
     this.recoverRequest();
     const id = scrapingAntHeader(request.headers, SCRAPINGANT_REQUEST_ID_HEADER);
-    if (id && this.activeRequest?.id === id) return request;
+    const key = scrapingAntParameter(request.url, "x-api-key");
+    if (id && this.activeRequests.get(key)?.id === id) return request;
     return this.queueRequest(() => request);
   }
 
@@ -2666,49 +2674,49 @@ class ScrapingAnt {
     return this.queueRequest(() => this.buildRequest(request, userAgent));
   }
 
-  buildRequest(request, userAgent) {
-    return this.enqueue(async () => {
-      const config = await this.getConfig();
-      if (!config.enabled) return null;
-      const keys = await this.getKeys();
-      if (!keys.some(Boolean)) throw new Error("Add a ScrapingAnt key in MangaHub's source settings, or disable ScrapingAnt.");
-      const candidates = keys.map((_, index) => index)
-        .filter((index) => keys[index] && keys.indexOf(keys[index]) === index);
-      const available = candidates.filter((index) => !config.slots[index].disabled && config.slots[index].retryAt <= Date.now());
-      const context = mangaHubRequestContext(request);
-      if (available.length) {
-        const index = available[this.nextKey % available.length];
-        this.nextKey = available.length > 1 ? (this.nextKey + 1) % available.length : 0;
-        const originalHeaders = {
-          ...request.headers ?? {},
-          Referer: `${MH_DOMAIN}/`,
-          Origin: MH_DOMAIN,
-          "User-Agent": userAgent
-        };
-        const headers = context.pageList ? { "Content-Type": "application/json" } : {};
-        const forwardedHeaders = context.pageList
-          ? [...SCRAPINGANT_FORWARDED_HEADERS, ...SCRAPINGANT_API_HEADERS]
-          : SCRAPINGANT_FORWARDED_HEADERS;
-        for (const name of forwardedHeaders) {
-          const value = scrapingAntHeader(originalHeaders, name.toLowerCase());
-          if (value) headers[`Ant-${name}`] = value;
-        }
-        return App.createRequest({
-          url: `${SCRAPINGANT_ENDPOINT}?url=${encodeURIComponent(request.url)}&x-api-key=${encodeURIComponent(keys[index])}&browser=false&proxy_type=datacenter&timeout=${SCRAPINGANT_TIMEOUT_SECONDS}`,
-          method: request.method,
-          headers,
-          ...(request.data == null ? {} : { data: typeof request.data === "string" ? request.data : JSON.stringify(request.data) }),
-          cookies: []
-        });
+  async buildRequest(request, userAgent) {
+    const config = await this.getConfig();
+    if (!config.enabled) return null;
+    const keys = await this.getKeys();
+    if (!keys.some(Boolean)) throw new Error("Add a ScrapingAnt key in MangaHub's source settings, or disable ScrapingAnt.");
+    const candidates = keys.map((_, index) => index)
+      .filter((index) => keys[index] && keys.indexOf(keys[index]) === index);
+    const available = candidates.filter((index) => !config.slots[index].disabled && config.slots[index].retryAt <= Date.now());
+    const context = mangaHubRequestContext(request);
+    if (available.length) {
+      const free = available.filter((index) => !this.activeRequests.has(keys[index]));
+      if (!free.length || this.activeRequests.size >= candidates.length) return this.waitForRequest();
+      const index = free.find((index) => index >= this.nextKey) ?? free[0];
+      this.nextKey = (index + 1) % SCRAPINGANT_KEY_LABELS.length;
+      const originalHeaders = {
+        ...request.headers ?? {},
+        Referer: `${MH_DOMAIN}/`,
+        Origin: MH_DOMAIN,
+        "User-Agent": userAgent
+      };
+      const headers = context.pageList ? { "Content-Type": "application/json" } : {};
+      const forwardedHeaders = context.pageList
+        ? [...SCRAPINGANT_FORWARDED_HEADERS, ...SCRAPINGANT_API_HEADERS]
+        : SCRAPINGANT_FORWARDED_HEADERS;
+      for (const name of forwardedHeaders) {
+        const value = scrapingAntHeader(originalHeaders, name.toLowerCase());
+        if (value) headers[`Ant-${name}`] = value;
       }
-      const reasons = candidates.map((index) => {
-        const slot = config.slots[index];
-        const reason = SCRAPINGANT_ERROR_REASONS[slot.lastStatus] || "Previously marked unavailable or rate-limited";
-        const seconds = Math.max(1, Math.ceil((slot.retryAt - Date.now()) / MILLISECONDS_PER_SECOND));
-        return `Key ${index + 1}: ${reason}${slot.lastStatus ? ` (HTTP ${slot.lastStatus})` : ""}. ${slot.disabled ? "Replace the key or reset key availability after credits renew." : `Local cooldown: ${seconds}s remaining.`}`;
+      return App.createRequest({
+        url: `${SCRAPINGANT_ENDPOINT}?url=${encodeURIComponent(request.url)}&x-api-key=${encodeURIComponent(keys[index])}&browser=false&proxy_type=datacenter&timeout=${SCRAPINGANT_TIMEOUT_SECONDS}`,
+        method: request.method,
+        headers,
+        ...(request.data == null ? {} : { data: typeof request.data === "string" ? request.data : JSON.stringify(request.data) }),
+        cookies: []
       });
-      throw new Error(`ScrapingAnt local key availability blocked the request\nRequest: ${context.stage}\nNo HTTP request sent\n${reasons.join("\n")}`);
+    }
+    const reasons = candidates.map((index) => {
+      const slot = config.slots[index];
+      const reason = SCRAPINGANT_ERROR_REASONS[slot.lastStatus] || "Previously marked unavailable or rate-limited";
+      const seconds = Math.max(1, Math.ceil((slot.retryAt - Date.now()) / MILLISECONDS_PER_SECOND));
+      return `Key ${index + 1}: ${reason}${slot.lastStatus ? ` (HTTP ${slot.lastStatus})` : ""}. ${slot.disabled ? "Replace the key or reset key availability after credits renew." : `Local cooldown: ${seconds}s remaining.`}`;
     });
+    throw new Error(`ScrapingAnt local key availability blocked the request\nRequest: ${context.stage}\nNo HTTP request sent\n${reasons.join("\n")}`);
   }
 
   async requestError(response, service, fallback) {

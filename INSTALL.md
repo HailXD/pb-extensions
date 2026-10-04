@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.11, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.12, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.11 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.11 from this repository.
+Install MangaHub 3.1.12 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.12 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -25,7 +25,7 @@ If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.11
+1. Open MangaHub's source settings in Paperback after updating to 3.1.12
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
 3. Enable `ScrapingAnt page lists and images`
 4. Open a chapter or retry a failed download
@@ -35,14 +35,15 @@ The masked fields save keys through Paperback's keychain-backed source store. No
 Chapter page-list GraphQL requests and chapter images from `imgx.mghcdn.com` go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
 
 - With one key entered in either field, uses only that key for every proxied request; empty fields and duplicate keys are ignored
-- Alternates keys only when both distinct keys are entered and usable
+- Prefers a free usable key; alternates when both distinct keys are free, and waits when all usable keys are busy
 - On a provider HTTP 403, marks that key unavailable for subsequent proxied requests; ScrapingAnt uses this status for invalid keys or exhausted credits
 - On provider HTTP 409 or 429, temporarily skips that key using `Retry-After` or a 60-second fallback; retry the failed page after the cooldown or with another available key
 - On a MangaHub chapter-page-list rate limit, requests a fresh MangaHub access token and retries once without adding a local cooldown
 - Does not silently fall back to direct page-list or image requests when ScrapingAnt is enabled but unavailable
-- Queues ScrapingAnt chapter-page-list and image requests together, admitting one request at a time across both keys within a source instance
-- Holds the network slot until response processing finishes, including provider errors and key-availability updates; direct requests do not use the slot
-- Uses a separate queue for settings and key state so a waiting image cannot block processing the active response
+- Queues ScrapingAnt chapter-page-list and image requests together with one in-flight request per distinct key within a source instance: one usable key permits one request, two usable keys permit up to two
+- Tracks slots by the actual key value, so duplicate entries share one slot and a key cannot be used concurrently with itself
+- Holds each key's network slot until its response processing finishes, including provider errors and key-availability updates; direct requests do not use these slots
+- Selects and reserves keys atomically with settings and key-state updates, but waits for network slots outside that state queue so waiting images cannot block active responses
 - Leaves image retries to Paperback; queued requests that have waited at least the 30-second request timeout are rejected before sending when their turn arrives
 
 After credits renew, use `Reset ScrapingAnt key availability` to let unavailable keys be tried again. Replacing a key also resets its local availability. This button does not reset either service's actual quota. Two keys may share one account's credits or concurrency limit.
@@ -84,7 +85,7 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Requests only chapter numbers, titles, and dates when refreshing a chapter list, omitting unused manga titles and chapter slugs
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
 - Limits scheduled requests to one per second to reduce bursts
-- Separately serializes ScrapingAnt page lists and images across both keys; this is an in-flight limit, not just request spacing
+- Separately serializes ScrapingAnt page lists and images per distinct key, allowing up to two concurrent requests with two usable keys; this is an in-flight limit, not just request spacing
 
 ## Rate-limit errors
 
