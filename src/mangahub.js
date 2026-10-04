@@ -3,7 +3,7 @@ const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
-const CDN_EXTENSIONS = [".jpg", ".png", ".webp"];
+const CDN_EXTENSIONS = [".jpg", ".png", ".webp", ".jpeg"];
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -182,14 +182,21 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async loadChapterPages(slug, number) {
     let ext = null;
+    let startPage = 1;
     for (const candidate of CDN_EXTENSIONS) {
       if (await this.checkPage(slug, number, 1, candidate)) {
         ext = candidate;
+        startPage = 1;
+        break;
+      }
+      if (await this.checkPage(slug, number, 0, candidate)) {
+        ext = candidate;
+        startPage = 0;
         break;
       }
     }
-    if (!ext) throw new Error("Chapter pages unavailable on CDN");
-    let low = 1;
+    if (!ext) throw new Error(`Chapter pages unavailable on CDN: ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
+    let low = startPage;
     let high = 16;
     while (await this.checkPage(slug, number, high, ext)) {
       low = high;
@@ -203,7 +210,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         high = mid;
       }
     }
-    return Array.from({ length: low }, (_, index) => `${MH_CDN_DOMAIN}/${slug}/${number}/${index + 1}${ext}`);
+    return Array.from({ length: low - startPage + 1 }, (_, index) => `${MH_CDN_DOMAIN}/${slug}/${number}/${index + startPage}${ext}`);
   }
 }
 
