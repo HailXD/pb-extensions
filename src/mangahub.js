@@ -4,6 +4,7 @@ const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
 const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
+const CDN_PAGE_PROBE_BATCH_SIZE = 8;
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -212,8 +213,11 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async resolveExt(slug, number, page, failedExt = null) {
     const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
-    const results = await Promise.all(candidates.map((candidate) => this.checkPage(slug, number, page, candidate)));
-    return candidates.find((candidate, index) => results[index]) ?? null;
+    const checks = candidates.map((candidate) => this.checkPage(slug, number, page, candidate));
+    for (const [index, candidate] of candidates.entries()) {
+      if (await checks[index]) return candidate;
+    }
+    return null;
   }
 
   async loadChapterPages(slug, number) {
@@ -229,15 +233,19 @@ class Mangahub extends UPSTREAM.Mangahub {
 
     const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
     let currentExt = ext1;
-    for (let page = startPage + 1; ; page++) {
-      if (!(await this.checkPage(slug, number, page, currentExt))) {
-        const nextExt = await this.resolveExt(slug, number, page, currentExt);
-        if (!nextExt) break;
-        currentExt = nextExt;
+    for (let firstPage = startPage + 1; ; firstPage += CDN_PAGE_PROBE_BATCH_SIZE) {
+      const batchExt = currentExt;
+      const checks = Array.from({ length: CDN_PAGE_PROBE_BATCH_SIZE }, (_, offset) =>
+        this.checkPage(slug, number, firstPage + offset, batchExt)
+      );
+      for (let offset = 0; offset < checks.length; offset++) {
+        const page = firstPage + offset;
+        const ext = await checks[offset] ? batchExt : await this.resolveExt(slug, number, page, batchExt);
+        if (!ext) return pages;
+        currentExt = ext;
+        pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
       }
-      pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${currentExt}`);
     }
-    return pages;
   }
 }
 
