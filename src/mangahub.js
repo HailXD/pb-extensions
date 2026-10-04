@@ -1,4 +1,5 @@
 const UPSTREAM = ROOT.Sources;
+const USE_GRAPHQL_PAGES = false;
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
@@ -35,6 +36,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       }
     });
+    this.chapterCrypto = new ChapterCrypto(this.requestManager);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
@@ -176,8 +178,8 @@ class Mangahub extends UPSTREAM.Mangahub {
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const slug = await this.getMainSlug(mangaId);
-    const cacheKey = JSON.stringify(["pages", slug, number]);
+    const slug = USE_GRAPHQL_PAGES ? mangaId : await this.getMainSlug(mangaId);
+    const cacheKey = JSON.stringify(["pages", USE_GRAPHQL_PAGES, slug, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.chapterPagesCache.delete(cacheKey);
@@ -186,7 +188,9 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     this.chapterPagesCache.delete(cacheKey);
     const pages = await this.shareRequest(cacheKey, async () => {
-      const pages = await this.loadChapterPages(slug, number);
+      const pages = USE_GRAPHQL_PAGES
+        ? await this.loadGraphqlPages(mangaId, number)
+        : await this.loadChapterPages(slug, number);
       this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
       while (this.chapterPagesCache.size > CHAPTER_PAGES_CACHE_LIMIT) {
         this.chapterPagesCache.delete(this.chapterPagesCache.keys().next().value);
@@ -194,6 +198,36 @@ class Mangahub extends UPSTREAM.Mangahub {
       return pages;
     });
     return App.createChapterDetails({ id: chapterId, mangaId, pages: pages.slice() });
+  }
+
+  async loadGraphqlPages(mangaId, number) {
+    for (let attempt = 0; attempt < MAX_CHAPTER_ATTEMPTS; attempt++) {
+      const request = App.createRequest({
+        url: MH_API_DOMAIN,
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        data: {
+          query: `query { chapter(x: m01, slug: ${JSON.stringify(mangaId)}, number: ${number}) { pages } }`
+        }
+      });
+      const response = await this.requestManager.schedule(request, 1);
+      await this.handleRateLimit(response);
+      const result = parseResponse(response, "Chapter pages unavailable");
+      if (result.errors?.length) {
+        const message = result.errors.map((error) => typeof error === "string" ? error : error?.message ?? "Unknown GraphQL error").join("; ");
+        if (RETRYABLE_API_ERROR.test(message) && attempt + 1 < MAX_CHAPTER_ATTEMPTS) {
+          await this.refreshAPIKey();
+          continue;
+        }
+        throw new Error(`Chapter pages unavailable: ${message}`);
+      }
+      try {
+        return await this.chapterCrypto.resolvePageUrls(result.data?.chapter?.pages);
+      } catch (error) {
+        if (!(error instanceof ChapterKeyMismatchError) || attempt + 1 >= MAX_CHAPTER_ATTEMPTS) throw error;
+        this.chapterCrypto.key = null;
+      }
+    }
   }
 
   async checkPage(slug, number, page, ext) {
