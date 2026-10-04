@@ -23,6 +23,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     this.pendingAccessKey = null;
     this.pendingRequests = new Map();
     this.chapterPagesCache = new Map();
+    this.mangaSlugs = new Map();
     this.requestManager = App.createRequestManager({
       requestsPerSecond: REQUESTS_PER_SECOND,
       requestTimeout: REQUEST_TIMEOUT_MS,
@@ -87,7 +88,7 @@ class Mangahub extends UPSTREAM.Mangahub {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
         data: {
-          query: `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { chapters { number title date } } }`
+          query: `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug chapters { number title date } } }`
         }
       });
       const response = await this.requestManager.schedule(request, 1);
@@ -96,7 +97,12 @@ class Mangahub extends UPSTREAM.Mangahub {
       if (result.errors?.length) {
         throw new Error("Chapters unavailable");
       }
-      const chapters = result.data?.manga?.chapters;
+      const manga = result.data?.manga;
+      if (manga?.mainSlug) {
+        this.mangaSlugs.set(mangaId, manga.mainSlug);
+        await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+      }
+      const chapters = manga?.chapters;
       if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
       return chapters.map((chapter) => App.createChapter({
         id: String(chapter.number),
@@ -145,10 +151,32 @@ class Mangahub extends UPSTREAM.Mangahub {
     this.pendingRequests.delete(ACCESS_KEY_STATE);
   }
 
+  async getMainSlug(mangaId) {
+    const cached = this.mangaSlugs.get(mangaId) || await this.stateManager.retrieve(`slug_${mangaId}`);
+    if (typeof cached === "string" && cached) return cached;
+    try {
+      const request = App.createRequest({
+        url: MH_API_DOMAIN,
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        data: { query: `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug } }` }
+      });
+      const response = await this.requestManager.schedule(request, 1);
+      const result = parseResponse(response, "Manga mainSlug unavailable");
+      const mainSlug = result.data?.manga?.mainSlug;
+      if (typeof mainSlug === "string" && mainSlug) {
+        this.mangaSlugs.set(mangaId, mainSlug);
+        await this.stateManager.store(`slug_${mangaId}`, mainSlug);
+        return mainSlug;
+      }
+    } catch {}
+    return decodeURIComponent(mangaId);
+  }
+
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const slug = (() => { try { return decodeURIComponent(mangaId); } catch { return mangaId; } })();
+    const slug = await this.getMainSlug(mangaId);
     const cacheKey = JSON.stringify(["pages", slug, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
