@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.27","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.28","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2483,7 +2483,7 @@ class ChapterCrypto {
 }
 
 const UPSTREAM = ROOT.Sources;
-const CHAPTER_PAGES_CACHE_TTL_MS = 6 * 60 * 60_000;
+const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
