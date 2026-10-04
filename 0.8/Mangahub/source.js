@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.28","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.29","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2491,7 +2491,6 @@ const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.j
 const CDN_REQUESTS_PER_SECOND = 30;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 24;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
-const CDN_PROBE_RANGE = "bytes=0-0";
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -2704,8 +2703,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     try {
       const response = await this.cdnRequestManager.schedule(App.createRequest({
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
-        method: "GET",
-        headers: { Range: CDN_PROBE_RANGE }
+        method: "HEAD"
       }), 1);
       this.lastCheckStatus += ` ${ext}:${response.status}`;
       if (response.status === 404 || response.status === 410) return false;

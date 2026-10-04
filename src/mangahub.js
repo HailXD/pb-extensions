@@ -7,7 +7,6 @@ const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.j
 const CDN_REQUESTS_PER_SECOND = 30;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 24;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
-const CDN_PROBE_RANGE = "bytes=0-0";
 const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
@@ -220,8 +219,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     try {
       const response = await this.cdnRequestManager.schedule(App.createRequest({
         url: `${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`,
-        method: "GET",
-        headers: { Range: CDN_PROBE_RANGE }
+        method: "HEAD"
       }), 1);
       this.lastCheckStatus += ` ${ext}:${response.status}`;
       if (response.status === 404 || response.status === 410) return false;
