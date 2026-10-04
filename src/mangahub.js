@@ -1,5 +1,5 @@
 const UPSTREAM = ROOT.Sources;
-const USE_GRAPHQL_PAGES = false;
+const USE_GRAPHQL_PAGES_STATE = "use_graphql_pages";
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
@@ -42,6 +42,28 @@ class Mangahub extends UPSTREAM.Mangahub {
       if (typeof stored !== "string") return "";
       const cookie = /(?:^|;\s*)mhub_access=([^;]*)/.exec(stored);
       return cookie ? cookie[1] : stored;
+    });
+  }
+
+  async getGraphqlPagesEnabled() {
+    return (await this.stateManager.retrieve(USE_GRAPHQL_PAGES_STATE)) === true;
+  }
+
+  async getSourceMenu() {
+    return App.createDUISection({
+      id: "settings",
+      isHidden: false,
+      rows: async () => [App.createDUISwitch({
+        id: USE_GRAPHQL_PAGES_STATE,
+        label: "Use GraphQL chapter pages",
+        value: App.createDUIBinding({
+          get: () => this.getGraphqlPagesEnabled(),
+          set: async (value) => {
+            await this.stateManager.store(USE_GRAPHQL_PAGES_STATE, value === true);
+            this.chapterPagesCache.clear();
+          }
+        })
+      })]
     });
   }
 
@@ -178,8 +200,9 @@ class Mangahub extends UPSTREAM.Mangahub {
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const slug = USE_GRAPHQL_PAGES ? mangaId : await this.getMainSlug(mangaId);
-    const cacheKey = JSON.stringify(["pages", USE_GRAPHQL_PAGES, slug, number]);
+    const useGraphqlPages = await this.getGraphqlPagesEnabled();
+    const slug = useGraphqlPages ? mangaId : await this.getMainSlug(mangaId);
+    const cacheKey = JSON.stringify(["pages", useGraphqlPages, slug, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.chapterPagesCache.delete(cacheKey);
@@ -188,7 +211,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     this.chapterPagesCache.delete(cacheKey);
     const pages = await this.shareRequest(cacheKey, async () => {
-      const pages = USE_GRAPHQL_PAGES
+      const pages = useGraphqlPages
         ? await this.loadGraphqlPages(mangaId, number)
         : await this.loadChapterPages(slug, number);
       this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
