@@ -29,7 +29,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       }
     });
     this.chapterCrypto = new ChapterCrypto(this.requestManager);
-    this.scrapingAnt = new ScrapingAnt(this.stateManager);
+    this.scrapingAnt = new ScrapingAnt(this.stateManager, REQUEST_TIMEOUT_MS);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
@@ -39,11 +39,12 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async getSourceMenu() {
+    this.scrapingAnt.recoverRequest();
     return createScrapingAntMenu(this.scrapingAnt, () => this.chapterPagesCache.clear());
   }
 
   async prepareMangaHubRequest(request) {
-    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return request;
+    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return this.scrapingAnt.prepareProxyRequest(request);
     if (request.url.startsWith(`${MH_CDN_DOMAIN}/`)) {
       const proxyRequest = await this.scrapingAnt.prepareRequest(request, await this.requestManager.getDefaultUserAgent());
       if (proxyRequest) return proxyRequest;

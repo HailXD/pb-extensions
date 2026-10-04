@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.10, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.11, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.10 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.10 from this repository.
+Install MangaHub 3.1.11 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.11 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -25,7 +25,7 @@ If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.10
+1. Open MangaHub's source settings in Paperback after updating to 3.1.11
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
 3. Enable `ScrapingAnt page lists and images`
 4. Open a chapter or retry a failed download
@@ -40,9 +40,14 @@ Chapter page-list GraphQL requests and chapter images from `imgx.mghcdn.com` go 
 - On provider HTTP 409 or 429, temporarily skips that key using `Retry-After` or a 60-second fallback; retry the failed page after the cooldown or with another available key
 - On a MangaHub chapter-page-list rate limit, requests a fresh MangaHub access token and retries once without adding a local cooldown
 - Does not silently fall back to direct page-list or image requests when ScrapingAnt is enabled but unavailable
-- Leaves image scheduling and retries to Paperback; source key selection is serialized, but native image downloads may overlap and reach the provider's concurrency limit
+- Queues ScrapingAnt chapter-page-list and image requests together, admitting one request at a time across both keys within a source instance
+- Holds the network slot until response processing finishes, including provider errors and key-availability updates; direct requests do not use the slot
+- Uses a separate queue for settings and key state so a waiting image cannot block processing the active response
+- Leaves image retries to Paperback; queued requests that have waited at least the 30-second request timeout are rejected before sending when their turn arrives
 
 After credits renew, use `Reset ScrapingAnt key availability` to let unavailable keys be tried again. Replacing a key also resets its local availability. This button does not reset either service's actual quota. Two keys may share one account's credits or concurrency limit.
+
+A request with no response callback can hold the slot for up to 60 seconds before it is eligible for recovery. The watchdog releases it automatically where JavaScript timers are available. Otherwise, retry a page or reopen the source settings after 60 seconds to recover the expired slot. Late responses cannot release a newer request's slot. This recovery assumes native requests have stopped by then; the queue cannot cancel native transfers or coordinate other source instances, devices, or applications using the same ScrapingAnt account.
 
 This is experimental and may add latency. It does not remove MangaHub's API rate limits or access-token requirements, or guarantee that ScrapingAnt can retrieve the image CDN's binary responses. Disable the switch if proxying does not help. In-app image downloads and live requests with user keys have not been verified during implementation.
 
@@ -79,6 +84,7 @@ Commit the updated `0.8/` files to publish changes. The Pages workflow deploys t
 - Requests only chapter numbers, titles, and dates when refreshing a chapter list, omitting unused manga titles and chapter slugs
 - Does not cache completed chapter-list requests, so a new refresh still checks for updates
 - Limits scheduled requests to one per second to reduce bursts
+- Separately serializes ScrapingAnt page lists and images across both keys; this is an in-flight limit, not just request spacing
 
 ## Rate-limit errors
 

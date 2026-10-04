@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.10","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with encrypted chapter page support","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.11","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 /** @fileOverview Javascript cryptography implementation.
  *
  * Crush to remove comments, shorten variable names and
@@ -2491,6 +2491,8 @@ const SCRAPINGANT_ORIGINAL_HEADER_PREFIX = "ant-original-header-";
 const SCRAPINGANT_FORWARDED_HEADERS = ["Accept", "Referer", "Origin", "User-Agent"];
 const SCRAPINGANT_API_HEADERS = ["Content-Type", "x-mhub-access"];
 const SCRAPINGANT_DEFAULT_COOLDOWN_MS = 60_000;
+const SCRAPINGANT_SLOT_TIMEOUT_MS = 60_000;
+const SCRAPINGANT_REQUEST_ID_HEADER = "x-mangahub-proxy-request";
 const MILLISECONDS_PER_SECOND = 1_000;
 const REQUEST_ERROR_DETAIL_LIMIT = 600;
 const SCRAPINGANT_ERROR_REASONS = {
@@ -2546,10 +2548,66 @@ function scrapingAntCooldown(response) {
 }
 
 class ScrapingAnt {
-  constructor(stateManager) {
+  constructor(stateManager, requestTimeout) {
     this.stateManager = stateManager;
+    this.requestTimeout = requestTimeout;
     this.pending = Promise.resolve();
+    this.networkPending = Promise.resolve();
+    this.activeRequest = null;
+    this.nextRequestId = 0;
     this.nextKey = 0;
+  }
+
+  releaseRequest(id) {
+    const slot = this.activeRequest;
+    if (!slot || slot.id !== id) return;
+    this.activeRequest = null;
+    if (slot.timer !== null && typeof clearTimeout === "function") clearTimeout(slot.timer);
+    slot.release();
+  }
+
+  recoverRequest() {
+    if (this.activeRequest && this.activeRequest.expiresAt <= Date.now()) {
+      this.releaseRequest(this.activeRequest.id);
+    }
+  }
+
+  async queueRequest(load) {
+    this.recoverRequest();
+    const previous = this.networkPending;
+    const slot = { id: String(++this.nextRequestId), release: null, timer: null, expiresAt: 0 };
+    this.networkPending = new Promise((resolve) => { slot.release = resolve; });
+    const queuedAt = Date.now();
+    await previous;
+    if (Date.now() - queuedAt >= this.requestTimeout) {
+      slot.release();
+      throw new Error("[ScrapingAnt] Local single-request queue wait timed out. No HTTP request sent; retry the page.");
+    }
+    this.activeRequest = slot;
+    slot.expiresAt = Date.now() + SCRAPINGANT_SLOT_TIMEOUT_MS;
+    try {
+      if (typeof setTimeout === "function") {
+        slot.timer = setTimeout(() => this.releaseRequest(slot.id), SCRAPINGANT_SLOT_TIMEOUT_MS);
+      }
+      const request = await load();
+      if (this.activeRequest !== slot) throw new Error("[ScrapingAnt] Local request slot expired before sending. Retry the page.");
+      if (request) {
+        request.headers = { ...request.headers, [SCRAPINGANT_REQUEST_ID_HEADER]: slot.id };
+      } else {
+        this.releaseRequest(slot.id);
+      }
+      return request;
+    } catch (error) {
+      this.releaseRequest(slot.id);
+      throw error;
+    }
+  }
+
+  prepareProxyRequest(request) {
+    this.recoverRequest();
+    const id = scrapingAntHeader(request.headers, SCRAPINGANT_REQUEST_ID_HEADER);
+    if (id && this.activeRequest?.id === id) return request;
+    return this.queueRequest(() => request);
   }
 
   enqueue(load) {
@@ -2602,7 +2660,13 @@ class ScrapingAnt {
     });
   }
 
-  prepareRequest(request, userAgent) {
+  async prepareRequest(request, userAgent) {
+    this.recoverRequest();
+    if (!(await this.getConfig()).enabled) return null;
+    return this.queueRequest(() => this.buildRequest(request, userAgent));
+  }
+
+  buildRequest(request, userAgent) {
     return this.enqueue(async () => {
       const config = await this.getConfig();
       if (!config.enabled) return null;
@@ -2677,6 +2741,15 @@ class ScrapingAnt {
   }
 
   async handleResponse(response) {
+    const id = scrapingAntHeader(response.request?.headers, SCRAPINGANT_REQUEST_ID_HEADER);
+    try {
+      return await this.processResponse(response);
+    } finally {
+      this.releaseRequest(id);
+    }
+  }
+
+  async processResponse(response) {
     const pageStatus = Number(scrapingAntHeader(response.headers, "ant-page-status-code"));
     const targetStatus = Number.isInteger(pageStatus) && pageStatus >= 100 && pageStatus < 600 ? pageStatus : null;
     if (response.status >= 400 && !(targetStatus >= 400)) {
@@ -2779,7 +2852,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       }
     });
     this.chapterCrypto = new ChapterCrypto(this.requestManager);
-    this.scrapingAnt = new ScrapingAnt(this.stateManager);
+    this.scrapingAnt = new ScrapingAnt(this.stateManager, REQUEST_TIMEOUT_MS);
     this.getMhubAccess = () => this.shareRequest(ACCESS_KEY_STATE, async () => {
       const stored = await this.stateManager.retrieve(ACCESS_KEY_STATE);
       if (typeof stored !== "string") return "";
@@ -2789,11 +2862,12 @@ class Mangahub extends UPSTREAM.Mangahub {
   }
 
   async getSourceMenu() {
+    this.scrapingAnt.recoverRequest();
     return createScrapingAntMenu(this.scrapingAnt, () => this.chapterPagesCache.clear());
   }
 
   async prepareMangaHubRequest(request) {
-    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return request;
+    if (request.url.startsWith(`${SCRAPINGANT_ENDPOINT}?`)) return this.scrapingAnt.prepareProxyRequest(request);
     if (request.url.startsWith(`${MH_CDN_DOMAIN}/`)) {
       const proxyRequest = await this.scrapingAnt.prepareRequest(request, await this.requestManager.getDefaultUserAgent());
       if (proxyRequest) return proxyRequest;
