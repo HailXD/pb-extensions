@@ -1,6 +1,6 @@
 # Paperback 0.8 installation
 
-The installable repository is `0.8/`. It contains MangaHub 3.1.7, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
+The installable repository is `0.8/`. It contains MangaHub 3.1.8, based on Netsky's 3.1.0 source, with chapter decryption adapted from Elrulia's 0.9 extension.
 
 ## Publish on GitHub Pages
 
@@ -17,7 +17,7 @@ Alternatively, serve the `0.8/` directory from any HTTPS static host and add its
 
 ## Update MangaHub
 
-Install MangaHub 3.1.7 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.7 from this repository.
+Install MangaHub 3.1.8 from this repository. The source ID remains `Mangahub`, and manga and chapter IDs are unchanged. This preserves the identifiers used by the original source; no library migration is intended. If the old repository also offers MangaHub, make sure Paperback selects version 3.1.8 from this repository.
 
 If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass and retry the chapter. Previously failed downloads may need to be retried in Paperback.
 
@@ -25,14 +25,14 @@ If MangaHub asks for Cloudflare verification, use the source's Cloudflare bypass
 
 ScrapingAnt is disabled by default. To try it:
 
-1. Open MangaHub's source settings in Paperback after updating to 3.1.7
+1. Open MangaHub's source settings in Paperback after updating to 3.1.8
 2. Enter one or both keys in `ScrapingAnt key 1` and `ScrapingAnt key 2`
 3. Enable `ScrapingAnt page lists and images`
 4. Open a chapter or retry a failed download
 
 The masked fields save keys through Paperback's keychain-backed source store. No keys are embedded in the extension or committed to this repository. Clear both fields to remove the stored keys. Disabling the switch returns page-list and image requests to the direct connection without deleting the keys. The existing switch and saved keys carry over from earlier versions.
 
-Chapter page-list GraphQL requests and chapter images from `imgx.mghcdn.com` go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. Binary response data is preserved for Paperback's image loader.
+Chapter page-list GraphQL requests and chapter images from `imgx.mghcdn.com` go through ScrapingAnt, with `browser=false` and standard datacenter proxies. Cover images, search, manga details, chapter-list updates, access-token refresh, and decryption-key requests stay direct. Requests are rewritten in Paperback's request interceptor, so saved page lists retain the original image URLs without API keys. For page-list requests, ScrapingAnt receives the POST query, JSON content type, and MangaHub access token. Image requests do not forward that token, and neither request type forwards Cloudflare cookies. The interceptor returns Paperback's original native response object, preserving binary data for the image loader while updating the target status and headers. This avoids the `interceptRResponse` invalid-return-type error caused by returning a plain JavaScript object.
 
 - With one key entered in either field, uses only that key for every proxied request; empty fields and duplicate keys are ignored
 - Alternates keys only when both distinct keys are entered and usable

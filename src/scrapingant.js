@@ -220,13 +220,9 @@ class ScrapingAnt {
         targetHeaders[lowerName.slice(SCRAPINGANT_ORIGINAL_HEADER_PREFIX.length)] = value;
       }
     }
-    return {
-      status: targetStatus ?? response.status,
-      data: response.data,
-      rawData: response.rawData,
-      headers: { ...response.headers, ...targetHeaders },
-      request: response.request
-    };
+    response.status = targetStatus ?? response.status;
+    response.headers = { ...response.headers, ...targetHeaders };
+    return response;
   }
 }
 
