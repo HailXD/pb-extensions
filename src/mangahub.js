@@ -9,8 +9,7 @@ const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
 const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
-const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
-const CDN_FALLBACK_EXTENSION = ".avif";
+const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg", ".avif"];
 const CDN_REQUESTS_PER_SECOND = 500;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 8;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
@@ -18,10 +17,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
 class MangaHubRateLimitError extends Error {}
-
-function getPreferredExt(ext) {
-  return /^[a-d]\.jpg$/.test(ext) ? CDN_EXTENSIONS[0] : ext;
-}
 
 function parseJson(data) {
   try {
@@ -257,59 +252,65 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
   }
 
-  async resolveExt(slug, number, page, failedExt = null) {
-    const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
-    let inconclusive = false;
-    const ext = await new Promise((resolve) => {
+  async scanExtensions(slug, number, page, candidates) {
+    return new Promise((resolve) => {
       let remaining = candidates.length;
+      let inconclusive = false;
+      if (!remaining) resolve({ ext: null, inconclusive });
       for (const candidate of candidates) {
         this.checkPage(slug, number, page, candidate).then((result) => {
           remaining -= 1;
           if (result === true) {
-            resolve(candidate);
+            resolve({ ext: candidate, inconclusive: false });
             return;
           }
           if (result === null) inconclusive = true;
           if (remaining !== 0) return;
-          resolve(null);
+          resolve({ ext: null, inconclusive });
         });
       }
     });
-    if (ext) return ext;
-    const fallback = failedExt === CDN_FALLBACK_EXTENSION ? false : await this.checkPage(slug, number, page, CDN_FALLBACK_EXTENSION);
-    if (fallback === true) return CDN_FALLBACK_EXTENSION;
-    if (inconclusive || fallback === null) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
+  }
+
+  async resolveExt(slug, number, page, detectedExtensions, probe = null) {
+    const candidates = probe?.extensions ?? (detectedExtensions.length ? detectedExtensions.slice() : CDN_EXTENSIONS.slice());
+    const result = await (probe?.check ?? this.scanExtensions(slug, number, page, candidates));
+    const fallback = result.ext ? null : await this.scanExtensions(slug, number, page, CDN_EXTENSIONS.filter((candidate) => !candidates.includes(candidate)));
+    const ext = result.ext || fallback?.ext;
+    if (ext) {
+      if (!detectedExtensions.includes(ext)) detectedExtensions.push(ext);
+      return ext;
+    }
+    if (result.inconclusive || fallback?.inconclusive) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
     return null;
   }
 
   async loadChapterPages(slug, number) {
     this.lastCheckStatus = "";
     this.lastCheckError = "";
+    const detectedExtensions = [];
     let startPage = 1;
-    let ext1 = await this.resolveExt(slug, number, 1);
+    let ext1 = await this.resolveExt(slug, number, 1, detectedExtensions);
     if (!ext1) {
-      ext1 = await this.resolveExt(slug, number, 0);
+      ext1 = await this.resolveExt(slug, number, 0, detectedExtensions);
       if (ext1) startPage = 0;
     }
     if (!ext1) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
 
     const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
-    let currentExt = getPreferredExt(ext1);
     let nextPage = startPage + 1;
     const pending = new Map();
     const queueNextPage = () => {
       const page = nextPage++;
-      const ext = currentExt;
-      pending.set(page, { ext, check: this.checkPage(slug, number, page, ext) });
+      const extensions = detectedExtensions.slice();
+      pending.set(page, { extensions, check: this.scanExtensions(slug, number, page, extensions) });
     };
     for (let offset = 0; offset < CDN_PAGE_PROBE_WINDOW_SIZE; offset++) queueNextPage();
     for (let page = startPage + 1; ; page++) {
       const probe = pending.get(page);
-      const exists = await probe.check;
+      const ext = await this.resolveExt(slug, number, page, detectedExtensions, probe);
       pending.delete(page);
-      const ext = exists === true ? probe.ext : await this.resolveExt(slug, number, page, exists === false ? probe.ext : null);
       if (!ext) return pages;
-      currentExt = getPreferredExt(ext);
       pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
       queueNextPage();
     }
