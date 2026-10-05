@@ -10,6 +10,7 @@ const CHAPTER_PAGES_CACHE_LIMIT = 16;
 const CHAPTER_LANGUAGE = "\u{1F1EC}\u{1F1E7}";
 const REQUESTS_PER_SECOND = 10;
 const CDN_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", "a.jpg", "b.jpg", "c.jpg", "d.jpg"];
+const CDN_FALLBACK_EXTENSION = ".avif";
 const CDN_REQUESTS_PER_SECOND = 500;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 8;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
@@ -258,9 +259,9 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async resolveExt(slug, number, page, failedExt = null) {
     const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
-    return new Promise((resolve, reject) => {
+    let inconclusive = false;
+    const ext = await new Promise((resolve) => {
       let remaining = candidates.length;
-      let inconclusive = false;
       for (const candidate of candidates) {
         this.checkPage(slug, number, page, candidate).then((result) => {
           remaining -= 1;
@@ -270,11 +271,15 @@ class Mangahub extends UPSTREAM.Mangahub {
           }
           if (result === null) inconclusive = true;
           if (remaining !== 0) return;
-          if (inconclusive) reject(new Error("MangaHub image probes timed out or were blocked. Reload this chapter."));
-          else resolve(null);
+          resolve(null);
         });
       }
     });
+    if (ext) return ext;
+    const fallback = failedExt === CDN_FALLBACK_EXTENSION ? false : await this.checkPage(slug, number, page, CDN_FALLBACK_EXTENSION);
+    if (fallback === true) return CDN_FALLBACK_EXTENSION;
+    if (inconclusive || fallback === null) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
+    return null;
   }
 
   async loadChapterPages(slug, number) {
