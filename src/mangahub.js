@@ -254,15 +254,23 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async resolveExt(slug, number, page, failedExt = null) {
     const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
-    const checks = candidates.map((candidate) => this.checkPage(slug, number, page, candidate));
-    let inconclusive = false;
-    for (const [index, candidate] of candidates.entries()) {
-      const result = await checks[index];
-      if (result === true) return candidate;
-      if (result === null) inconclusive = true;
-    }
-    if (inconclusive) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
-    return null;
+    return new Promise((resolve, reject) => {
+      let remaining = candidates.length;
+      let inconclusive = false;
+      for (const candidate of candidates) {
+        this.checkPage(slug, number, page, candidate).then((result) => {
+          remaining -= 1;
+          if (result === true) {
+            resolve(candidate);
+            return;
+          }
+          if (result === null) inconclusive = true;
+          if (remaining !== 0) return;
+          if (inconclusive) reject(new Error("MangaHub image probes timed out or were blocked. Reload this chapter."));
+          else resolve(null);
+        });
+      }
+    });
   }
 
   async loadChapterPages(slug, number) {

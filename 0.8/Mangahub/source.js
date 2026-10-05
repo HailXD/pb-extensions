@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with CDN chapter page probing","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.33","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with CDN chapter page probing","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.34","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
@@ -1789,15 +1789,23 @@ class Mangahub extends UPSTREAM.Mangahub {
 
   async resolveExt(slug, number, page, failedExt = null) {
     const candidates = CDN_EXTENSIONS.filter((candidate) => candidate !== failedExt);
-    const checks = candidates.map((candidate) => this.checkPage(slug, number, page, candidate));
-    let inconclusive = false;
-    for (const [index, candidate] of candidates.entries()) {
-      const result = await checks[index];
-      if (result === true) return candidate;
-      if (result === null) inconclusive = true;
-    }
-    if (inconclusive) throw new Error("MangaHub image probes timed out or were blocked. Reload this chapter.");
-    return null;
+    return new Promise((resolve, reject) => {
+      let remaining = candidates.length;
+      let inconclusive = false;
+      for (const candidate of candidates) {
+        this.checkPage(slug, number, page, candidate).then((result) => {
+          remaining -= 1;
+          if (result === true) {
+            resolve(candidate);
+            return;
+          }
+          if (result === null) inconclusive = true;
+          if (remaining !== 0) return;
+          if (inconclusive) reject(new Error("MangaHub image probes timed out or were blocked. Reload this chapter."));
+          else resolve(null);
+        });
+      }
+    });
   }
 
   async loadChapterPages(slug, number) {
