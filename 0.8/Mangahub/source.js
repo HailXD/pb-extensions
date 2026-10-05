@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with CDN chapter page probing","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.34","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with CDN chapter page probing","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.37","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
@@ -1552,6 +1552,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
 
 class MangaHubRateLimitError extends Error {}
+
+function getPreferredExt(ext) {
+  return /^[a-d]\.jpg$/.test(ext) ? CDN_EXTENSIONS[0] : ext;
+}
 
 function parseJson(data) {
   try {
@@ -1820,7 +1824,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     if (!ext1) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
 
     const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
-    let currentExt = ext1;
+    let currentExt = getPreferredExt(ext1);
     let nextPage = startPage + 1;
     const pending = new Map();
     const queueNextPage = () => {
@@ -1835,7 +1839,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       pending.delete(page);
       const ext = exists === true ? probe.ext : await this.resolveExt(slug, number, page, exists === false ? probe.ext : null);
       if (!ext) return pages;
-      currentExt = ext;
+      currentExt = getPreferredExt(ext);
       pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
       queueNextPage();
     }

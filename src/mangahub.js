@@ -18,6 +18,10 @@ const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests
 
 class MangaHubRateLimitError extends Error {}
 
+function getPreferredExt(ext) {
+  return /^[a-d]\.jpg$/.test(ext) ? CDN_EXTENSIONS[0] : ext;
+}
+
 function parseJson(data) {
   try {
     return typeof data === "string" ? JSON.parse(data) : data;
@@ -285,7 +289,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     if (!ext1) throw new Error(`CDN probe failed [status=${this.lastCheckStatus || "none"}, err=${this.lastCheckError || "none"}] on ${MH_CDN_DOMAIN}/${slug}/${number}/1.*`);
 
     const pages = [`${MH_CDN_DOMAIN}/${slug}/${number}/${startPage}${ext1}`];
-    let currentExt = ext1;
+    let currentExt = getPreferredExt(ext1);
     let nextPage = startPage + 1;
     const pending = new Map();
     const queueNextPage = () => {
@@ -300,7 +304,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       pending.delete(page);
       const ext = exists === true ? probe.ext : await this.resolveExt(slug, number, page, exists === false ? probe.ext : null);
       if (!ext) return pages;
-      currentExt = ext;
+      currentExt = getPreferredExt(ext);
       pages.push(`${MH_CDN_DOMAIN}/${slug}/${number}/${page}${ext}`);
       queueNextPage();
     }
