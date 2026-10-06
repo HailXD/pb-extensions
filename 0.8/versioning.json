@@ -4,11 +4,11 @@
     {
       "id": "Mangahub",
       "name": "Mangahub",
-      "author": "HailXD, Netsky, Elrulia",
+      "author": "HailXD, Netsky",
       "desc": "MangaHub for Paperback 0.8 with CDN chapter page probing",
       "website": "https://github.com/HailXD/pb-extensions",
       "contentRating": "MATURE",
-      "version": "3.1.39",
+      "version": "3.1.40",
       "icon": "icon.png",
       "tags": [],
       "websiteBaseURL": "https://mangahub.io",
