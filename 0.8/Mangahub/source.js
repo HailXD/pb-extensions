@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with API chapter pages and CDN probing fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.42","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with API chapter pages and CDN probing fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.43","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
@@ -1553,9 +1553,6 @@ const CDN_REQUESTS_PER_SECOND = 500;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 8;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
-
-class MangaHubRateLimitError extends Error {}
 
 function parseJson(data) {
   try {
@@ -1592,10 +1589,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       requestTimeout: REQUEST_TIMEOUT_MS,
       interceptor: {
         interceptRequest: (request) => this.prepareMangaHubRequest(request),
-        interceptResponse: async (response) => {
-          await this.handleRateLimit(response);
-          return response;
-        }
+        interceptResponse: async (response) => response
       }
     });
     this.chapterRequestManager = App.createRequestManager({
@@ -1645,15 +1639,6 @@ class Mangahub extends UPSTREAM.Mangahub {
     return request;
   }
 
-  async handleRateLimit(response) {
-    const result = parseJson(response.data);
-    const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
-      RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
-    )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
-    if (response.status !== 429 && !limited) return;
-    throw new MangaHubRateLimitError("MangaHub rate limit reached");
-  }
-
   shareRequest(key, load) {
     if (!this.pendingRequests.has(key)) {
       const pending = Promise.resolve().then(load).finally(() => {
@@ -1679,7 +1664,6 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
-      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapters unavailable");
       if (result.errors?.length) {
         throw new Error("Chapters unavailable");

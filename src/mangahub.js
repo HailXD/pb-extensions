@@ -18,9 +18,6 @@ const CDN_REQUESTS_PER_SECOND = 500;
 const CDN_PAGE_PROBE_WINDOW_SIZE = 8;
 const CDN_PROBE_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30_000;
-const RATE_LIMIT_ERROR = /(?:rate|api)[\s_-]*limit|too[\s_-]*many[\s_-]*requests|quota.*(?:exceed|exhaust)/i;
-
-class MangaHubRateLimitError extends Error {}
 
 function parseJson(data) {
   try {
@@ -57,10 +54,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       requestTimeout: REQUEST_TIMEOUT_MS,
       interceptor: {
         interceptRequest: (request) => this.prepareMangaHubRequest(request),
-        interceptResponse: async (response) => {
-          await this.handleRateLimit(response);
-          return response;
-        }
+        interceptResponse: async (response) => response
       }
     });
     this.chapterRequestManager = App.createRequestManager({
@@ -110,15 +104,6 @@ class Mangahub extends UPSTREAM.Mangahub {
     return request;
   }
 
-  async handleRateLimit(response) {
-    const result = parseJson(response.data);
-    const limited = (Array.isArray(result?.errors) && result.errors.some((error) =>
-      RATE_LIMIT_ERROR.test(typeof error === "string" ? error : error?.message ?? "") || RATE_LIMIT_ERROR.test(error?.extensions?.code ?? "")
-    )) || [result?.message, result?.error, result?.detail].some((value) => typeof value === "string" && RATE_LIMIT_ERROR.test(value));
-    if (response.status !== 429 && !limited) return;
-    throw new MangaHubRateLimitError("MangaHub rate limit reached");
-  }
-
   shareRequest(key, load) {
     if (!this.pendingRequests.has(key)) {
       const pending = Promise.resolve().then(load).finally(() => {
@@ -144,7 +129,6 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       });
       const response = await this.requestManager.schedule(request, 1);
-      await this.handleRateLimit(response);
       const result = parseResponse(response, "Chapters unavailable");
       if (result.errors?.length) {
         throw new Error("Chapters unavailable");
