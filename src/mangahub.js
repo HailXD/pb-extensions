@@ -63,6 +63,14 @@ class Mangahub extends UPSTREAM.Mangahub {
         }
       }
     });
+    this.chapterRequestManager = App.createRequestManager({
+      requestsPerSecond: REQUESTS_PER_SECOND,
+      requestTimeout: REQUEST_TIMEOUT_MS,
+      interceptor: {
+        interceptRequest: (request) => this.prepareMangaHubRequest(request),
+        interceptResponse: async (response) => response
+      }
+    });
     this.cdnRequestManager = App.createRequestManager({
       requestsPerSecond: CDN_REQUESTS_PER_SECOND,
       requestTimeout: CDN_PROBE_TIMEOUT_MS,
@@ -312,8 +320,8 @@ class Mangahub extends UPSTREAM.Mangahub {
           headers: { Accept: "application/json", "Content-Type": "application/json", "x-mhub-access": access },
           data: { query: `query { chapter(x: m01, slug: ${JSON.stringify(slug)}, number: ${number}) { pages } }` }
         });
-        const response = await this.requestManager.schedule(request, 1);
-        const result = parseResponse(response, "Chapter pages unavailable");
+        const response = await this.chapterRequestManager.schedule(request, 1);
+        const result = parseJson(response.data);
         const pages = parseJson(result?.data?.chapter?.pages);
         if (response.status >= 200 && response.status < 300 && !result?.errors?.length &&
             typeof pages?.p === "string" && pages.p.length && Array.isArray(pages.i) && pages.i.length &&

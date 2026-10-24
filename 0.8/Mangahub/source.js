@@ -1532,7 +1532,7 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with API chapter pages and CDN probing fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.41","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with API chapter pages and CDN probing fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.42","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
@@ -1596,6 +1596,14 @@ class Mangahub extends UPSTREAM.Mangahub {
           await this.handleRateLimit(response);
           return response;
         }
+      }
+    });
+    this.chapterRequestManager = App.createRequestManager({
+      requestsPerSecond: REQUESTS_PER_SECOND,
+      requestTimeout: REQUEST_TIMEOUT_MS,
+      interceptor: {
+        interceptRequest: (request) => this.prepareMangaHubRequest(request),
+        interceptResponse: async (response) => response
       }
     });
     this.cdnRequestManager = App.createRequestManager({
@@ -1847,8 +1855,8 @@ class Mangahub extends UPSTREAM.Mangahub {
           headers: { Accept: "application/json", "Content-Type": "application/json", "x-mhub-access": access },
           data: { query: `query { chapter(x: m01, slug: ${JSON.stringify(slug)}, number: ${number}) { pages } }` }
         });
-        const response = await this.requestManager.schedule(request, 1);
-        const result = parseResponse(response, "Chapter pages unavailable");
+        const response = await this.chapterRequestManager.schedule(request, 1);
+        const result = parseJson(response.data);
         const pages = parseJson(result?.data?.chapter?.pages);
         if (response.status >= 200 && response.status < 300 && !result?.errors?.length &&
             typeof pages?.p === "string" && pages.p.length && Array.isArray(pages.i) && pages.i.length &&
