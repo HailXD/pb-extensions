@@ -1532,12 +1532,16 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, Elrulia","desc":"MangaHub for Paperback 0.8 with CDN chapter page probing","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.39","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with API chapter pages and CDN probing fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.41","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = "https://api.mghcdn.com/graphql";
 const MH_CDN_DOMAIN = "https://imgx.mghcdn.com";
 const ACCESS_KEY_STATE = "mhub_key";
+const CHAPTER_ACCESS_KEY_STATE = "chapter_mhub_key";
+const CHAPTER_ACCESS_KEY_LENGTH = 32;
+const CHAPTER_ACCESS_KEY_PATTERN = /^[0-9a-f]{32}$/;
+const CHAPTER_API_ATTEMPTS = 2;
 const ACCESS_COOKIE_NAME = "mhub_access";
 const ACCESS_KEY_REFRESH_PATH = "/chapter/the-last-human/chapter-1?reloadKey=1";
 const CHAPTER_PAGES_CACHE_TTL_MS = 60_000;
@@ -1579,6 +1583,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   constructor() {
     super();
     this.pendingAccessKey = null;
+    this.pendingChapterAccessKey = Promise.resolve();
     this.pendingRequests = new Map();
     this.chapterPagesCache = new Map();
     this.mangaSlugs = new Map();
@@ -1627,7 +1632,7 @@ class Mangahub extends UPSTREAM.Mangahub {
       Referer: `${MH_DOMAIN}/`,
       Origin: MH_DOMAIN,
       "User-Agent": userAgent,
-      "x-mhub-access": access
+      "x-mhub-access": request.headers?.["x-mhub-access"] ?? access
     };
     return request;
   }
@@ -1820,7 +1825,43 @@ class Mangahub extends UPSTREAM.Mangahub {
     return null;
   }
 
+  getChapterAccessKey(failedKey = null) {
+    const load = async () => {
+      const stored = await this.stateManager.retrieve(CHAPTER_ACCESS_KEY_STATE);
+      if (typeof stored === "string" && CHAPTER_ACCESS_KEY_PATTERN.test(stored) && stored !== failedKey) return stored;
+      const key = Array.from({ length: CHAPTER_ACCESS_KEY_LENGTH }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+      await this.stateManager.store(CHAPTER_ACCESS_KEY_STATE, key);
+      return key;
+    };
+    this.pendingChapterAccessKey = this.pendingChapterAccessKey.then(load, load);
+    return this.pendingChapterAccessKey;
+  }
+
   async loadChapterPages(slug, number) {
+    let access = await this.getChapterAccessKey();
+    for (let attempt = 0; attempt < CHAPTER_API_ATTEMPTS; attempt++) {
+      try {
+        const request = App.createRequest({
+          url: MH_API_DOMAIN,
+          method: "POST",
+          headers: { Accept: "application/json", "Content-Type": "application/json", "x-mhub-access": access },
+          data: { query: `query { chapter(x: m01, slug: ${JSON.stringify(slug)}, number: ${number}) { pages } }` }
+        });
+        const response = await this.requestManager.schedule(request, 1);
+        const result = parseResponse(response, "Chapter pages unavailable");
+        const pages = parseJson(result?.data?.chapter?.pages);
+        if (response.status >= 200 && response.status < 300 && !result?.errors?.length &&
+            typeof pages?.p === "string" && pages.p.length && Array.isArray(pages.i) && pages.i.length &&
+            pages.i.every((image) => typeof image === "string" && image.length)) {
+          return pages.i.map((image) => `${MH_CDN_DOMAIN}/${pages.p}${image}`);
+        }
+      } catch {}
+      access = await this.getChapterAccessKey(access);
+    }
+    return this.probeChapterPages(slug, number);
+  }
+
+  async probeChapterPages(slug, number) {
     this.lastCheckStatus = "";
     this.lastCheckError = "";
     const detectedExtensions = [];
