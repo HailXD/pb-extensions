@@ -1,5 +1,5 @@
 {
-  "buildTime": "2026-11-09T04:49:31.455Z",
+  "buildTime": "2026-11-09T12:13:12.905Z",
   "sources": [
     {
       "id": "Mangahub",
@@ -8,7 +8,7 @@
       "desc": "MangaHub for Paperback 0.8 with website metadata and direct CDN chapter pages",
       "website": "https://github.com/HailXD/pb-extensions",
       "contentRating": "MATURE",
-      "version": "3.1.44",
+      "version": "3.1.45",
       "icon": "icon.png",
       "tags": [],
       "websiteBaseURL": "https://mangahub.io",
