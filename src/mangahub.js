@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright © 2026 kittycatgit */
 /* Search and session handling adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/050303d9a3161c51dc5853ef3b8573fa63c28c3e/src/MangaHub */
+/* API, chapter crypto and parsing adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/94f794a5399b55c77fa80965395ef0142acd8350/src/MangaHub */
 
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = `${MH_DOMAIN}/graphql`;
+const MH_CHAPTER_CRYPTO_URL = `${MH_DOMAIN}/api/chapter-crypto`;
+const MH_CHAPTER_KEY_TTL_MS = 300_000;
+const MH_CHAPTER_KEY_REFRESH_MS = 30_000;
 const MH_LEGACY_API_DOMAIN = "https://api.mghcdn.com/graphql";
 const MH_CDN_DOMAIN = "https://imgx.mghcdn.com";
 const MH_HOST = "mangahub.io";
@@ -15,6 +19,16 @@ const MH_SEARCH_SOURCE = "m01";
 const MH_SEARCH_PAGE_SIZE = 30;
 const MH_SEARCH_DEFAULT_SORT = "POPULAR";
 const MH_SEARCH_LIST_FIELDS = "id,rank,title,slug,status,image,latestChapter,genres,author,isSafe,isLicensed,updatedDate";
+const MH_UPDATE_FIELDS = "id,title,slug,image,latestChapter,isSafe,isLicensed";
+const MH_MANGA_FIELDS = "id,rank,title,alternativeTitle,slug,mainSlug,status,image,latestChapter,genres,author,artist,isWebtoon,isYaoi,isPorn,isSoftPorn,isSafe,isLicensed,description,createdDate,updatedDate,chapters{id,number,title,slug,date}";
+const MH_HOME_SECTIONS = [
+  { id: "popular_update", title: "Popular Updates", type: "featured" },
+  { id: "latest_update", title: "Latest Updates", type: "singleRowNormal" },
+  { id: "popular_manga", title: "Popular", type: "singleRowLarge", sort: "POPULAR" },
+  { id: "new_manga", title: "New", type: "singleRowNormal", sort: "NEW" },
+  { id: "completed_manga", title: "Completed", type: "singleRowNormal", sort: "COMPLETED" }
+];
+const MH_STATUS_LABELS = { ongoing: "Ongoing", completed: "Completed", cancelled: "Cancelled", canceled: "Cancelled", hiatus: "Hiatus" };
 const MH_SORT_OPTIONS = [
   { id: "POPULAR", label: "Popular" },
   { id: "LATEST", label: "Latest" },
@@ -216,6 +230,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     this.searchSession = {};
     this.searchSessionLoaded = false;
     this.searchOwnToken = "";
+    this.chapterKeys = null;
     this.requestManager = App.createRequestManager({
       requestsPerSecond: REQUESTS_PER_SECOND,
       requestTimeout: REQUEST_TIMEOUT_MS,
@@ -298,12 +313,16 @@ class Mangahub extends UPSTREAM.Mangahub {
     if (changed) await this.stateManager.store(MH_SESSION_STATE, { ...this.searchSession });
   }
 
-  async requestSearchAPI(query, label) {
+  async accessToken() {
     await this.loadSearchSession();
     if (!this.searchSession[MH_ACCESS_COOKIE] && !this.searchOwnToken) {
       while (this.searchOwnToken.length < 32) this.searchOwnToken += Math.floor(Math.random() * 16).toString(16);
     }
-    const token = this.searchSession[MH_ACCESS_COOKIE] || this.searchOwnToken;
+    return this.searchSession[MH_ACCESS_COOKIE] || this.searchOwnToken;
+  }
+
+  async requestSearchAPI(query, label, token) {
+    token ??= await this.accessToken();
     const response = await this.requestManager.schedule(App.createRequest({
       url: MH_API_DOMAIN,
       method: "POST",
@@ -314,10 +333,58 @@ class Mangahub extends UPSTREAM.Mangahub {
     const payload = parseJson(response.data);
     if (Array.isArray(payload?.errors) && payload.errors.length) {
       const message = payload.errors.map((error) => error?.message ?? "unknown").join("; ");
-      if (/rate limit/i.test(message)) this.searchOwnToken = "";
+      if (/rate limit/i.test(message)) {
+        this.searchOwnToken = "";
+        this.chapterKeys = null;
+      }
       throw new Error(`${label}: ${message}`);
     }
     return parseResponse(response, label);
+  }
+
+  async chapterSession() {
+    const token = await this.accessToken();
+    if (this.chapterKeys?.token === token && this.chapterKeys.expiresAt > Date.now() + MH_CHAPTER_KEY_REFRESH_MS) {
+      return this.chapterKeys;
+    }
+    return this.shareRequest(JSON.stringify(["chapter-keys", token]), async () => {
+      const response = await this.requestManager.schedule(App.createRequest({
+        url: MH_CHAPTER_CRYPTO_URL,
+        method: "GET",
+        headers: { Accept: "application/json", "x-mhub-access": token },
+        cookies: [App.createCookie({ name: MH_ACCESS_COOKIE, value: token, domain: MH_HOST, path: "/" })]
+      }), 1);
+      const payload = parseJson(response.data);
+      if (response.status >= 400 || !payload || typeof payload !== "object") {
+        throw new Error(`MangaHub did not issue a chapter key (HTTP ${response.status})`);
+      }
+      const keys = { ...payload.keys };
+      if (payload.keyId && payload.key) keys[payload.keyId] = payload.key;
+      if (!Object.keys(keys).length) throw new Error("MangaHub issued no chapter keys");
+      this.chapterKeys = {
+        token,
+        keys,
+        expiresAt: typeof payload.expiresAt === "number" ? payload.expiresAt : Date.now() + MH_CHAPTER_KEY_TTL_MS
+      };
+      return this.chapterKeys;
+    });
+  }
+
+  async apiChapterPages(mangaId, number) {
+    for (let attempt = 0; ; attempt++) {
+      const session = await this.chapterSession();
+      try {
+        const result = await this.requestSearchAPI(
+          `{chapter(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)},number:${number}){id,mangaID,number,title,slug,date,pages,s}}`,
+          "Chapter pages unavailable",
+          session.token
+        );
+        return parseApiPages(result.data.chapter?.pages, session.keys);
+      } catch (error) {
+        this.chapterKeys = null;
+        if (attempt > 0 || !/chapter encryption/i.test(String(error?.message ?? error))) throw error;
+      }
+    }
   }
 
   async requestAPI(query, label) {
@@ -418,15 +485,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     const total = result.data.search?.count ?? 0;
     const nextOffset = offset + rows.length;
     return App.createPagedResults({
-      results: rows.map((row) => {
-        const image = (row.image ?? "").trim();
-        return App.createPartialSourceManga({
-          mangaId: row.slug,
-          title: row.title?.trim() || row.slug,
-          image: image ? (/^https?:\/\//i.test(image) ? image : `${MH_COVER_CDN}/${image.replace(/^\/+/, "")}`) : `${MH_COVER_CDN}/no-cover.jpg`,
-          ...(typeof row.latestChapter === "number" ? { subtitle: `Chapter ${row.latestChapter}` } : {})
-        });
-      }),
+      results: rows.map(listItem),
       metadata: rows.length && nextOffset < total ? { ...filters, offset: nextOffset } : undefined
     });
   }
@@ -441,31 +500,136 @@ class Mangahub extends UPSTREAM.Mangahub {
     return this.pendingRequests.get(key);
   }
 
+  async getCloudflareBypassRequestAsync() {
+    return App.createRequest({
+      url: MH_DOMAIN,
+      method: "GET",
+      headers: { Referer: `${MH_DOMAIN}/`, "User-Agent": await this.requestManager.getDefaultUserAgent() }
+    });
+  }
+
+  async sectionItems(sectionId, offset) {
+    let rows;
+    if (sectionId === "popular_update") {
+      if (offset > 0) return [];
+      const result = await this.requestSearchAPI(
+        `{latestPopular(x:${MH_SEARCH_SOURCE}){${MH_UPDATE_FIELDS}}}`,
+        "Popular updates unavailable"
+      );
+      rows = result.data.latestPopular;
+    } else if (sectionId === "latest_update") {
+      const result = await this.requestSearchAPI(
+        `{latest(x:${MH_SEARCH_SOURCE},limit:${MH_SEARCH_PAGE_SIZE},offset:${offset}){${MH_UPDATE_FIELDS},updatedDate,chapters{id,number,title,date}}}`,
+        "Latest updates unavailable"
+      );
+      rows = result.data.latest?.map((row) => {
+        const newest = [...row.chapters ?? []].sort((a, b) => b.number - a.number)[0];
+        return { ...row, latestChapter: newest?.number ?? row.latestChapter };
+      });
+    } else {
+      const entry = MH_HOME_SECTIONS.find((section) => section.id === sectionId);
+      if (!entry?.sort) throw new Error(`Unknown MangaHub section: ${sectionId}`);
+      const result = await this.requestSearchAPI(
+        `{search(${this.searchArgs("", { sort: entry.sort }, offset)}){rows{${MH_SEARCH_LIST_FIELDS}},count}}`,
+        `${entry.title} unavailable`
+      );
+      rows = result.data.search?.rows;
+    }
+    if (!Array.isArray(rows)) throw new Error("MangaHub returned an invalid section");
+    return rows.map(listItem);
+  }
+
+  async getHomePageSections(sectionCallback) {
+    const sections = MH_HOME_SECTIONS.map(({ sort, ...entry }) => ({
+      ...entry,
+      containsMoreItems: entry.id !== "popular_update"
+    }));
+    for (const section of sections) sectionCallback(App.createHomeSection(section));
+    let fallback;
+    await Promise.all(sections.map(async (section) => {
+      let items;
+      try {
+        items = await this.sectionItems(section.id, 0);
+      } catch {
+        fallback ??= (async () => {
+          const collected = new Map();
+          await super.getHomePageSections((entry) => collected.set(entry.id, entry.items ?? []));
+          return collected;
+        })();
+        items = (await fallback).get(section.id);
+        if (!items) throw new Error(`MangaHub section unavailable: ${section.id}`);
+      }
+      sectionCallback(App.createHomeSection({ ...section, items }));
+    }));
+  }
+
+  async getViewMoreItems(homepageSectionId, metadata) {
+    try {
+      const offset = metadata?.offset ?? 0;
+      const items = await this.sectionItems(homepageSectionId, offset);
+      return App.createPagedResults({
+        results: items,
+        metadata: items.length ? { offset: offset + items.length } : undefined
+      });
+    } catch {
+      return super.getViewMoreItems(homepageSectionId, metadata);
+    }
+  }
+
   getMangaDetails(mangaId) {
-    return this.shareRequest(JSON.stringify(["manga", mangaId]), () => super.getMangaDetails(mangaId));
+    return this.shareRequest(JSON.stringify(["manga", mangaId]), async () => {
+      try {
+        const result = await this.requestSearchAPI(
+          `{manga(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)}){${MH_MANGA_FIELDS}}}`,
+          "Manga details unavailable"
+        );
+        if (!result.data.manga) throw new Error(`No title found for ${mangaId}`);
+        return parseApiManga(result.data.manga, mangaId);
+      } catch {
+        return super.getMangaDetails(mangaId);
+      }
+    });
   }
 
   getChapters(mangaId) {
     return this.shareRequest(JSON.stringify(["chapters", mangaId]), async () => {
-      const result = await this.requestAPI(
-        `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug chapters { number title date } } }`,
-        "Chapters unavailable"
-      );
-      const manga = result.data?.manga;
-      if (manga?.mainSlug) {
-        this.mangaSlugs.set(mangaId, manga.mainSlug);
-        await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+      try {
+        const result = await this.requestSearchAPI(
+          `{manga(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)}){mainSlug,chapters{id,number,title,slug,date}}}`,
+          "Chapters unavailable"
+        );
+        const manga = result.data.manga;
+        if (!Array.isArray(manga?.chapters) || !manga.chapters.length) throw new Error(`No chapters found for ${mangaId}`);
+        if (manga.mainSlug) {
+          this.mangaSlugs.set(mangaId, manga.mainSlug);
+          await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+        }
+        return parseApiChapters(manga.chapters);
+      } catch {
+        return this.getFallbackChapters(mangaId);
       }
-      const chapters = manga?.chapters;
-      if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
-      return chapters.map((chapter) => App.createChapter({
-        id: String(chapter.number),
-        name: chapter.title || `Chapter ${chapter.number}`,
-        langCode: CHAPTER_LANGUAGE,
-        chapNum: chapter.number,
-        time: new Date(chapter.date)
-      }));
     });
+  }
+
+  async getFallbackChapters(mangaId) {
+    const result = await this.requestAPI(
+      `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug chapters { number title date } } }`,
+      "Chapters unavailable"
+    );
+    const manga = result.data?.manga;
+    if (manga?.mainSlug) {
+      this.mangaSlugs.set(mangaId, manga.mainSlug);
+      await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+    }
+    const chapters = manga?.chapters;
+    if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
+    return chapters.map((chapter) => App.createChapter({
+      id: String(chapter.number),
+      name: chapter.title || `Chapter ${chapter.number}`,
+      langCode: CHAPTER_LANGUAGE,
+      chapNum: chapter.number,
+      time: new Date(chapter.date)
+    }));
   }
 
   async getMainSlug(mangaId) {
@@ -489,8 +653,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const slug = await this.getMainSlug(mangaId);
-    const cacheKey = JSON.stringify(["pages", slug, number]);
+    const cacheKey = JSON.stringify(["pages", mangaId, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.chapterPagesCache.delete(cacheKey);
@@ -499,7 +662,16 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     this.chapterPagesCache.delete(cacheKey);
     const pages = await this.shareRequest(cacheKey, async () => {
-      const pages = await this.probeChapterPages(slug, number);
+      let pages;
+      try {
+        pages = await this.apiChapterPages(mangaId, number);
+      } catch (apiError) {
+        try {
+          pages = await this.probeChapterPages(await this.getMainSlug(mangaId), number);
+        } catch (fallbackError) {
+          throw new Error(`MangaHub API: ${apiError?.message ?? apiError}; CDN fallback: ${fallbackError?.message ?? fallbackError}`);
+        }
+      }
       this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
       while (this.chapterPagesCache.size > CHAPTER_PAGES_CACHE_LIMIT) {
         this.chapterPagesCache.delete(this.chapterPagesCache.keys().next().value);

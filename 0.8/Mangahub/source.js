@@ -1532,14 +1532,335 @@ this.Sources = _Sources; if (typeof exports === 'object' && typeof module !== 'u
 
 
 ((ROOT) => {
-const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky","desc":"MangaHub for Paperback 0.8 with website metadata and direct CDN chapter pages","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.45","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+const SOURCE_INFO = {"id":"Mangahub","name":"Mangahub","author":"HailXD, Netsky, kittycatgit","desc":"MangaHub for Paperback 0.8 with Kitty API loading and direct CDN fallback","website":"https://github.com/HailXD/pb-extensions","contentRating":"MATURE","version":"3.1.46","icon":"icon.png","tags":[],"websiteBaseURL":"https://mangahub.io","intents":53};
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright © 2026 kittycatgit */
+/* Adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/94f794a5399b55c77fa80965395ef0142acd8350/src/MangaHub/crypto.ts */
+
+// The site encrypts a chapter's page list with AES-256-GCM and hands the key out
+// from /api/chapter-crypto. GCM is counter mode under the hood, so the payload is
+// read with CTR starting at the second block. The tag is not recomputed: a wrong
+// key yields garbage that fails to parse, which is the same outcome. The runtime
+// has no WebCrypto, atob or TextDecoder, so all of it lives here.
+
+const SBOX_HEX =
+  "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0" +
+  "b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275" +
+  "09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf" +
+  "d0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2" +
+  "cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb" +
+  "e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08" +
+  "ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e" +
+  "e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16";
+
+const SBOX = (() => {
+  const table = new Uint8Array(256);
+
+  for (let i = 0; i < 256; i++) {
+    table[i] = parseInt(SBOX_HEX.substring(i * 2, i * 2 + 2), 16);
+  }
+
+  return table;
+})();
+
+const RCON = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+const ROUNDS = 14;
+
+const xtime = (byte) => ((byte << 1) ^ (byte & 0x80 ? 0x1b : 0)) & 0xff;
+
+/** AES-256 key schedule: 15 round keys of 16 bytes. */
+function expandKey(key) {
+  const words = 8;
+  const schedule = new Uint8Array(16 * (ROUNDS + 1));
+  schedule.set(key, 0);
+
+  for (let i = words; i < 4 * (ROUNDS + 1); i++) {
+    const at = i * 4;
+    let a = schedule[at - 4];
+    let b = schedule[at - 3];
+    let c = schedule[at - 2];
+    let d = schedule[at - 1];
+
+    if (i % words === 0) {
+      const rotated = [SBOX[b] ^ RCON[i / words], SBOX[c], SBOX[d], SBOX[a]];
+      [a, b, c, d] = [rotated[0], rotated[1], rotated[2], rotated[3]];
+    } else if (i % words === 4) {
+      [a, b, c, d] = [SBOX[a], SBOX[b], SBOX[c], SBOX[d]];
+    }
+
+    schedule[at] = schedule[at - words * 4] ^ a;
+    schedule[at + 1] = schedule[at - words * 4 + 1] ^ b;
+    schedule[at + 2] = schedule[at - words * 4 + 2] ^ c;
+    schedule[at + 3] = schedule[at - words * 4 + 3] ^ d;
+  }
+
+  return schedule;
+}
+
+function encryptBlock(schedule, block) {
+  const addRoundKey = (round) => {
+    for (let i = 0; i < 16; i++) {
+      block[i] ^= schedule[round * 16 + i];
+    }
+  };
+
+  const subBytes = () => {
+    for (let i = 0; i < 16; i++) {
+      block[i] = SBOX[block[i]];
+    }
+  };
+
+  // The state is column major, so byte c * 4 + r holds row r of column c.
+  const shiftRows = () => {
+    for (let row = 1; row < 4; row++) {
+      const current = [block[row], block[4 + row], block[8 + row], block[12 + row]];
+
+      for (let column = 0; column < 4; column++) {
+        block[column * 4 + row] = current[(column + row) % 4];
+      }
+    }
+  };
+
+  const mixColumns = () => {
+    for (let column = 0; column < 4; column++) {
+      const at = column * 4;
+      const a0 = block[at];
+      const a1 = block[at + 1];
+      const a2 = block[at + 2];
+      const a3 = block[at + 3];
+      const parity = a0 ^ a1 ^ a2 ^ a3;
+
+      block[at] = a0 ^ parity ^ xtime(a0 ^ a1);
+      block[at + 1] = a1 ^ parity ^ xtime(a1 ^ a2);
+      block[at + 2] = a2 ^ parity ^ xtime(a2 ^ a3);
+      block[at + 3] = a3 ^ parity ^ xtime(a3 ^ a0);
+    }
+  };
+
+  addRoundKey(0);
+
+  for (let round = 1; round < ROUNDS; round++) {
+    subBytes();
+    shiftRows();
+    mixColumns();
+    addRoundKey(round);
+  }
+
+  subBytes();
+  shiftRows();
+  addRoundKey(ROUNDS);
+}
+
+const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function base64UrlToBytes(value) {
+  const clean = value
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/[^A-Za-z0-9\-_]/g, "");
+  const bytes = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let buffer = 0;
+  let bits = 0;
+  let written = 0;
+
+  for (const character of clean) {
+    const index = B64URL.indexOf(character);
+
+    if (index < 0) {
+      throw new Error("The chapter payload is not valid base64url");
+    }
+
+    buffer = (buffer << 6) | index;
+    bits += 6;
+
+    if (bits >= 8) {
+      bits -= 8;
+      bytes[written++] = (buffer >> bits) & 0xff;
+    }
+  }
+
+  return bytes.subarray(0, written);
+}
+
+function utf8Decode(bytes) {
+  let out = "";
+
+  for (let i = 0; i < bytes.length;) {
+    const byte = bytes[i];
+    const width = byte < 0x80 ? 1 : byte < 0xe0 ? 2 : byte < 0xf0 ? 3 : 4;
+    let code = width === 1 ? byte : byte & (width === 2 ? 0x1f : width === 3 ? 0x0f : 0x07);
+
+    for (let k = 1; k < width; k++) {
+      code = (code << 6) | (bytes[i + k] & 0x3f);
+    }
+
+    i += width;
+
+    if (code > 0xffff) {
+      code -= 0x10000;
+      out += String.fromCharCode(0xd800 + (code >> 10), 0xdc00 + (code & 0x3ff));
+    } else {
+      out += String.fromCharCode(code);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Decrypts an `enc:v1:<keyId>:<nonce>:<tag>:<ciphertext>` chapter payload.
+ * @param keys the keys this access token holds, by key id
+ */
+function decryptEncV1(payload, keys) {
+  const parts = payload.split(":");
+
+  if (parts.length !== 6 || parts[0] !== "enc" || parts[1] !== "v1") {
+    throw new Error("The chapter payload is not in the enc:v1 format");
+  }
+
+  const keyId = parts[2];
+  const key = keys[keyId];
+
+  if (!key) {
+    throw new Error(`The site encrypted the chapter with a key it did not hand out (${keyId})`);
+  }
+
+  const keyBytes = base64UrlToBytes(key);
+  const nonce = base64UrlToBytes(parts[3]);
+
+  if (keyBytes.length !== 32 || nonce.length !== 12) {
+    throw new Error("The chapter key or nonce is the wrong size");
+  }
+
+  const ciphertext = base64UrlToBytes(parts[5]);
+  const schedule = expandKey(keyBytes);
+  // GCM builds its first counter block from the 96 bit nonce as nonce||1 and
+  // encrypts that for the tag, so the page data starts one block later.
+  const counter = new Uint8Array(16);
+  counter.set(nonce, 0);
+  let block = 2;
+
+  const plain = new Uint8Array(ciphertext.length);
+  const keystream = new Uint8Array(16);
+
+  for (let offset = 0; offset < ciphertext.length; offset += 16) {
+    counter[12] = (block >>> 24) & 0xff;
+    counter[13] = (block >>> 16) & 0xff;
+    counter[14] = (block >>> 8) & 0xff;
+    counter[15] = block & 0xff;
+    block++;
+
+    keystream.set(counter);
+    encryptBlock(schedule, keystream);
+
+    const span = Math.min(16, ciphertext.length - offset);
+
+    for (let i = 0; i < span; i++) {
+      plain[offset + i] = ciphertext[offset + i] ^ keystream[i];
+    }
+  }
+
+  return utf8Decode(plain);
+}
+
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Copyright © 2026 kittycatgit */
+/* Adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/94f794a5399b55c77fa80965395ef0142acd8350/src/MangaHub */
+
+function coverUrl(image) {
+  const path = (image ?? "").trim();
+  return path ? (/^https?:\/\//i.test(path) ? path : `${MH_COVER_CDN}/${path.replace(/^\/+/, "")}`) : `${MH_COVER_CDN}/no-cover.jpg`;
+}
+
+function listItem(row) {
+  return App.createPartialSourceManga({
+    mangaId: row.slug,
+    title: row.title?.trim() || row.slug,
+    image: coverUrl(row.image),
+    ...(typeof row.latestChapter === "number" ? { subtitle: `Chapter ${row.latestChapter}` } : {})
+  });
+}
+
+function genreId(name) {
+  const known = MH_GENRES.find((genre) => genre.label.toLowerCase() === name.toLowerCase());
+  return known?.id || name.toLowerCase().replace(/[^a-z0-9._\-@()[\]%?#+=/&:]+/g, "-").replace(/-{2,}/g, "-").replace(/^-|-$/g, "") || "unknown";
+}
+
+function parseApiManga(manga, mangaId) {
+  const tags = (manga.genres ?? "").split(",").map((genre) => genre.trim()).filter(Boolean)
+    .map((genre) => App.createTag({ id: genreId(genre), label: genre }));
+  const titles = [manga.title?.trim() || mangaId];
+  for (const part of (manga.alternativeTitle ?? "").split(";")) {
+    const title = part.trim();
+    if (title && !titles.includes(title)) titles.push(title);
+  }
+  const additionalInfo = {};
+  if (typeof manga.latestChapter === "number") additionalInfo["Latest Chapter"] = String(manga.latestChapter);
+  if (Array.isArray(manga.chapters)) additionalInfo.Chapters = String(manga.chapters.length);
+  if (typeof manga.rank === "number") additionalInfo.Rank = `#${manga.rank}`;
+  if (manga.isWebtoon) additionalInfo.Format = "Webtoon";
+  if (manga.isLicensed) additionalInfo.Licensed = "Yes";
+  if (manga.updatedDate) {
+    const updated = new Date(manga.updatedDate);
+    if (!Number.isNaN(updated.getTime())) additionalInfo.Updated = updated.toISOString().slice(0, 10);
+  }
+  const status = (manga.status ?? "").toLowerCase();
+  const author = manga.author?.trim();
+  const artist = manga.artist?.trim();
+  return App.createSourceManga({
+    id: mangaId,
+    mangaInfo: App.createMangaInfo({
+      titles,
+      image: coverUrl(manga.image),
+      desc: (manga.description ?? "").trim(),
+      status: MH_STATUS_LABELS[status] ?? (status ? status.charAt(0).toUpperCase() + status.slice(1) : "Unknown"),
+      hentai: Boolean(manga.isPorn || manga.isSoftPorn || manga.isYaoi),
+      ...(author ? { author } : {}),
+      ...(artist ? { artist } : {}),
+      ...(tags.length ? { tags: [App.createTagSection({ id: "genres", label: "Genres", tags })] } : {}),
+      ...(Object.keys(additionalInfo).length ? { additionalInfo } : {})
+    })
+  });
+}
+
+function parseApiChapters(rows) {
+  const sorted = [...rows].sort((a, b) => b.number - a.number);
+  return sorted.map((row, index) => {
+    const published = row.date ? new Date(row.date) : undefined;
+    const title = row.title?.trim();
+    return App.createChapter({
+      id: String(row.number),
+      chapNum: row.number,
+      langCode: CHAPTER_LANGUAGE,
+      sortingIndex: sorted.length - index,
+      name: title || `Chapter ${row.number}`,
+      ...(published && !Number.isNaN(published.getTime()) ? { time: published } : {})
+    });
+  });
+}
+
+function parseApiPages(payload, keys) {
+  const raw = typeof payload === "string" && payload.startsWith("enc:v1:") ? decryptEncV1(payload, keys) : payload;
+  const pages = parseJson(raw);
+  if (!pages || !Array.isArray(pages.i) || !pages.i.length ||
+      pages.i.some((name) => typeof name !== "string" || !name.length)) {
+    throw new Error("MangaHub returned an invalid chapter page list");
+  }
+  const prefix = typeof pages.p === "string" ? pages.p : "";
+  return pages.i.map((name) => `${MH_CDN_DOMAIN}/${`${prefix}${name}`.replace(/^\/+/, "")}`);
+}
+
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Copyright © 2026 kittycatgit */
 /* Search and session handling adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/050303d9a3161c51dc5853ef3b8573fa63c28c3e/src/MangaHub */
+/* API, chapter crypto and parsing adapted from https://github.com/kittycatgit/kitty-extensions-0.8/tree/94f794a5399b55c77fa80965395ef0142acd8350/src/MangaHub */
 
 const UPSTREAM = ROOT.Sources;
 const MH_DOMAIN = "https://mangahub.io";
 const MH_API_DOMAIN = `${MH_DOMAIN}/graphql`;
+const MH_CHAPTER_CRYPTO_URL = `${MH_DOMAIN}/api/chapter-crypto`;
+const MH_CHAPTER_KEY_TTL_MS = 300_000;
+const MH_CHAPTER_KEY_REFRESH_MS = 30_000;
 const MH_LEGACY_API_DOMAIN = "https://api.mghcdn.com/graphql";
 const MH_CDN_DOMAIN = "https://imgx.mghcdn.com";
 const MH_HOST = "mangahub.io";
@@ -1550,6 +1871,16 @@ const MH_SEARCH_SOURCE = "m01";
 const MH_SEARCH_PAGE_SIZE = 30;
 const MH_SEARCH_DEFAULT_SORT = "POPULAR";
 const MH_SEARCH_LIST_FIELDS = "id,rank,title,slug,status,image,latestChapter,genres,author,isSafe,isLicensed,updatedDate";
+const MH_UPDATE_FIELDS = "id,title,slug,image,latestChapter,isSafe,isLicensed";
+const MH_MANGA_FIELDS = "id,rank,title,alternativeTitle,slug,mainSlug,status,image,latestChapter,genres,author,artist,isWebtoon,isYaoi,isPorn,isSoftPorn,isSafe,isLicensed,description,createdDate,updatedDate,chapters{id,number,title,slug,date}";
+const MH_HOME_SECTIONS = [
+  { id: "popular_update", title: "Popular Updates", type: "featured" },
+  { id: "latest_update", title: "Latest Updates", type: "singleRowNormal" },
+  { id: "popular_manga", title: "Popular", type: "singleRowLarge", sort: "POPULAR" },
+  { id: "new_manga", title: "New", type: "singleRowNormal", sort: "NEW" },
+  { id: "completed_manga", title: "Completed", type: "singleRowNormal", sort: "COMPLETED" }
+];
+const MH_STATUS_LABELS = { ongoing: "Ongoing", completed: "Completed", cancelled: "Cancelled", canceled: "Cancelled", hiatus: "Hiatus" };
 const MH_SORT_OPTIONS = [
   { id: "POPULAR", label: "Popular" },
   { id: "LATEST", label: "Latest" },
@@ -1751,6 +2082,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     this.searchSession = {};
     this.searchSessionLoaded = false;
     this.searchOwnToken = "";
+    this.chapterKeys = null;
     this.requestManager = App.createRequestManager({
       requestsPerSecond: REQUESTS_PER_SECOND,
       requestTimeout: REQUEST_TIMEOUT_MS,
@@ -1833,12 +2165,16 @@ class Mangahub extends UPSTREAM.Mangahub {
     if (changed) await this.stateManager.store(MH_SESSION_STATE, { ...this.searchSession });
   }
 
-  async requestSearchAPI(query, label) {
+  async accessToken() {
     await this.loadSearchSession();
     if (!this.searchSession[MH_ACCESS_COOKIE] && !this.searchOwnToken) {
       while (this.searchOwnToken.length < 32) this.searchOwnToken += Math.floor(Math.random() * 16).toString(16);
     }
-    const token = this.searchSession[MH_ACCESS_COOKIE] || this.searchOwnToken;
+    return this.searchSession[MH_ACCESS_COOKIE] || this.searchOwnToken;
+  }
+
+  async requestSearchAPI(query, label, token) {
+    token ??= await this.accessToken();
     const response = await this.requestManager.schedule(App.createRequest({
       url: MH_API_DOMAIN,
       method: "POST",
@@ -1849,10 +2185,58 @@ class Mangahub extends UPSTREAM.Mangahub {
     const payload = parseJson(response.data);
     if (Array.isArray(payload?.errors) && payload.errors.length) {
       const message = payload.errors.map((error) => error?.message ?? "unknown").join("; ");
-      if (/rate limit/i.test(message)) this.searchOwnToken = "";
+      if (/rate limit/i.test(message)) {
+        this.searchOwnToken = "";
+        this.chapterKeys = null;
+      }
       throw new Error(`${label}: ${message}`);
     }
     return parseResponse(response, label);
+  }
+
+  async chapterSession() {
+    const token = await this.accessToken();
+    if (this.chapterKeys?.token === token && this.chapterKeys.expiresAt > Date.now() + MH_CHAPTER_KEY_REFRESH_MS) {
+      return this.chapterKeys;
+    }
+    return this.shareRequest(JSON.stringify(["chapter-keys", token]), async () => {
+      const response = await this.requestManager.schedule(App.createRequest({
+        url: MH_CHAPTER_CRYPTO_URL,
+        method: "GET",
+        headers: { Accept: "application/json", "x-mhub-access": token },
+        cookies: [App.createCookie({ name: MH_ACCESS_COOKIE, value: token, domain: MH_HOST, path: "/" })]
+      }), 1);
+      const payload = parseJson(response.data);
+      if (response.status >= 400 || !payload || typeof payload !== "object") {
+        throw new Error(`MangaHub did not issue a chapter key (HTTP ${response.status})`);
+      }
+      const keys = { ...payload.keys };
+      if (payload.keyId && payload.key) keys[payload.keyId] = payload.key;
+      if (!Object.keys(keys).length) throw new Error("MangaHub issued no chapter keys");
+      this.chapterKeys = {
+        token,
+        keys,
+        expiresAt: typeof payload.expiresAt === "number" ? payload.expiresAt : Date.now() + MH_CHAPTER_KEY_TTL_MS
+      };
+      return this.chapterKeys;
+    });
+  }
+
+  async apiChapterPages(mangaId, number) {
+    for (let attempt = 0; ; attempt++) {
+      const session = await this.chapterSession();
+      try {
+        const result = await this.requestSearchAPI(
+          `{chapter(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)},number:${number}){id,mangaID,number,title,slug,date,pages,s}}`,
+          "Chapter pages unavailable",
+          session.token
+        );
+        return parseApiPages(result.data.chapter?.pages, session.keys);
+      } catch (error) {
+        this.chapterKeys = null;
+        if (attempt > 0 || !/chapter encryption/i.test(String(error?.message ?? error))) throw error;
+      }
+    }
   }
 
   async requestAPI(query, label) {
@@ -1953,15 +2337,7 @@ class Mangahub extends UPSTREAM.Mangahub {
     const total = result.data.search?.count ?? 0;
     const nextOffset = offset + rows.length;
     return App.createPagedResults({
-      results: rows.map((row) => {
-        const image = (row.image ?? "").trim();
-        return App.createPartialSourceManga({
-          mangaId: row.slug,
-          title: row.title?.trim() || row.slug,
-          image: image ? (/^https?:\/\//i.test(image) ? image : `${MH_COVER_CDN}/${image.replace(/^\/+/, "")}`) : `${MH_COVER_CDN}/no-cover.jpg`,
-          ...(typeof row.latestChapter === "number" ? { subtitle: `Chapter ${row.latestChapter}` } : {})
-        });
-      }),
+      results: rows.map(listItem),
       metadata: rows.length && nextOffset < total ? { ...filters, offset: nextOffset } : undefined
     });
   }
@@ -1976,31 +2352,136 @@ class Mangahub extends UPSTREAM.Mangahub {
     return this.pendingRequests.get(key);
   }
 
+  async getCloudflareBypassRequestAsync() {
+    return App.createRequest({
+      url: MH_DOMAIN,
+      method: "GET",
+      headers: { Referer: `${MH_DOMAIN}/`, "User-Agent": await this.requestManager.getDefaultUserAgent() }
+    });
+  }
+
+  async sectionItems(sectionId, offset) {
+    let rows;
+    if (sectionId === "popular_update") {
+      if (offset > 0) return [];
+      const result = await this.requestSearchAPI(
+        `{latestPopular(x:${MH_SEARCH_SOURCE}){${MH_UPDATE_FIELDS}}}`,
+        "Popular updates unavailable"
+      );
+      rows = result.data.latestPopular;
+    } else if (sectionId === "latest_update") {
+      const result = await this.requestSearchAPI(
+        `{latest(x:${MH_SEARCH_SOURCE},limit:${MH_SEARCH_PAGE_SIZE},offset:${offset}){${MH_UPDATE_FIELDS},updatedDate,chapters{id,number,title,date}}}`,
+        "Latest updates unavailable"
+      );
+      rows = result.data.latest?.map((row) => {
+        const newest = [...row.chapters ?? []].sort((a, b) => b.number - a.number)[0];
+        return { ...row, latestChapter: newest?.number ?? row.latestChapter };
+      });
+    } else {
+      const entry = MH_HOME_SECTIONS.find((section) => section.id === sectionId);
+      if (!entry?.sort) throw new Error(`Unknown MangaHub section: ${sectionId}`);
+      const result = await this.requestSearchAPI(
+        `{search(${this.searchArgs("", { sort: entry.sort }, offset)}){rows{${MH_SEARCH_LIST_FIELDS}},count}}`,
+        `${entry.title} unavailable`
+      );
+      rows = result.data.search?.rows;
+    }
+    if (!Array.isArray(rows)) throw new Error("MangaHub returned an invalid section");
+    return rows.map(listItem);
+  }
+
+  async getHomePageSections(sectionCallback) {
+    const sections = MH_HOME_SECTIONS.map(({ sort, ...entry }) => ({
+      ...entry,
+      containsMoreItems: entry.id !== "popular_update"
+    }));
+    for (const section of sections) sectionCallback(App.createHomeSection(section));
+    let fallback;
+    await Promise.all(sections.map(async (section) => {
+      let items;
+      try {
+        items = await this.sectionItems(section.id, 0);
+      } catch {
+        fallback ??= (async () => {
+          const collected = new Map();
+          await super.getHomePageSections((entry) => collected.set(entry.id, entry.items ?? []));
+          return collected;
+        })();
+        items = (await fallback).get(section.id);
+        if (!items) throw new Error(`MangaHub section unavailable: ${section.id}`);
+      }
+      sectionCallback(App.createHomeSection({ ...section, items }));
+    }));
+  }
+
+  async getViewMoreItems(homepageSectionId, metadata) {
+    try {
+      const offset = metadata?.offset ?? 0;
+      const items = await this.sectionItems(homepageSectionId, offset);
+      return App.createPagedResults({
+        results: items,
+        metadata: items.length ? { offset: offset + items.length } : undefined
+      });
+    } catch {
+      return super.getViewMoreItems(homepageSectionId, metadata);
+    }
+  }
+
   getMangaDetails(mangaId) {
-    return this.shareRequest(JSON.stringify(["manga", mangaId]), () => super.getMangaDetails(mangaId));
+    return this.shareRequest(JSON.stringify(["manga", mangaId]), async () => {
+      try {
+        const result = await this.requestSearchAPI(
+          `{manga(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)}){${MH_MANGA_FIELDS}}}`,
+          "Manga details unavailable"
+        );
+        if (!result.data.manga) throw new Error(`No title found for ${mangaId}`);
+        return parseApiManga(result.data.manga, mangaId);
+      } catch {
+        return super.getMangaDetails(mangaId);
+      }
+    });
   }
 
   getChapters(mangaId) {
     return this.shareRequest(JSON.stringify(["chapters", mangaId]), async () => {
-      const result = await this.requestAPI(
-        `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug chapters { number title date } } }`,
-        "Chapters unavailable"
-      );
-      const manga = result.data?.manga;
-      if (manga?.mainSlug) {
-        this.mangaSlugs.set(mangaId, manga.mainSlug);
-        await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+      try {
+        const result = await this.requestSearchAPI(
+          `{manga(x:${MH_SEARCH_SOURCE},slug:${JSON.stringify(mangaId)}){mainSlug,chapters{id,number,title,slug,date}}}`,
+          "Chapters unavailable"
+        );
+        const manga = result.data.manga;
+        if (!Array.isArray(manga?.chapters) || !manga.chapters.length) throw new Error(`No chapters found for ${mangaId}`);
+        if (manga.mainSlug) {
+          this.mangaSlugs.set(mangaId, manga.mainSlug);
+          await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+        }
+        return parseApiChapters(manga.chapters);
+      } catch {
+        return this.getFallbackChapters(mangaId);
       }
-      const chapters = manga?.chapters;
-      if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
-      return chapters.map((chapter) => App.createChapter({
-        id: String(chapter.number),
-        name: chapter.title || `Chapter ${chapter.number}`,
-        langCode: CHAPTER_LANGUAGE,
-        chapNum: chapter.number,
-        time: new Date(chapter.date)
-      }));
     });
+  }
+
+  async getFallbackChapters(mangaId) {
+    const result = await this.requestAPI(
+      `query { manga(x: m01, slug: ${JSON.stringify(mangaId)}) { mainSlug chapters { number title date } } }`,
+      "Chapters unavailable"
+    );
+    const manga = result.data?.manga;
+    if (manga?.mainSlug) {
+      this.mangaSlugs.set(mangaId, manga.mainSlug);
+      await this.stateManager.store(`slug_${mangaId}`, manga.mainSlug);
+    }
+    const chapters = manga?.chapters;
+    if (!Array.isArray(chapters) || !chapters.length) throw new Error(`Couldn't find any chapters for mangaId: ${mangaId}!`);
+    return chapters.map((chapter) => App.createChapter({
+      id: String(chapter.number),
+      name: chapter.title || `Chapter ${chapter.number}`,
+      langCode: CHAPTER_LANGUAGE,
+      chapNum: chapter.number,
+      time: new Date(chapter.date)
+    }));
   }
 
   async getMainSlug(mangaId) {
@@ -2024,8 +2505,7 @@ class Mangahub extends UPSTREAM.Mangahub {
   async getChapterDetails(mangaId, chapterId) {
     const number = Number(chapterId);
     if (!Number.isFinite(number)) throw new Error("Invalid MangaHub chapter number");
-    const slug = await this.getMainSlug(mangaId);
-    const cacheKey = JSON.stringify(["pages", slug, number]);
+    const cacheKey = JSON.stringify(["pages", mangaId, number]);
     const cached = this.chapterPagesCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.chapterPagesCache.delete(cacheKey);
@@ -2034,7 +2514,16 @@ class Mangahub extends UPSTREAM.Mangahub {
     }
     this.chapterPagesCache.delete(cacheKey);
     const pages = await this.shareRequest(cacheKey, async () => {
-      const pages = await this.probeChapterPages(slug, number);
+      let pages;
+      try {
+        pages = await this.apiChapterPages(mangaId, number);
+      } catch (apiError) {
+        try {
+          pages = await this.probeChapterPages(await this.getMainSlug(mangaId), number);
+        } catch (fallbackError) {
+          throw new Error(`MangaHub API: ${apiError?.message ?? apiError}; CDN fallback: ${fallbackError?.message ?? fallbackError}`);
+        }
+      }
       this.chapterPagesCache.set(cacheKey, { pages, expiresAt: Date.now() + CHAPTER_PAGES_CACHE_TTL_MS });
       while (this.chapterPagesCache.size > CHAPTER_PAGES_CACHE_LIMIT) {
         this.chapterPagesCache.delete(this.chapterPagesCache.keys().next().value);

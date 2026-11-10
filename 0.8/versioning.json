@@ -1,14 +1,14 @@
 {
-  "buildTime": "2026-11-09T12:13:12.905Z",
+  "buildTime": "2026-11-10T10:34:18.000Z",
   "sources": [
     {
       "id": "Mangahub",
       "name": "Mangahub",
-      "author": "HailXD, Netsky",
-      "desc": "MangaHub for Paperback 0.8 with website metadata and direct CDN chapter pages",
+      "author": "HailXD, Netsky, kittycatgit",
+      "desc": "MangaHub for Paperback 0.8 with Kitty API loading and direct CDN fallback",
       "website": "https://github.com/HailXD/pb-extensions",
       "contentRating": "MATURE",
-      "version": "3.1.45",
+      "version": "3.1.46",
       "icon": "icon.png",
       "tags": [],
       "websiteBaseURL": "https://mangahub.io",
